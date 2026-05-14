@@ -1,0 +1,12 @@
+auth:
+  username: "admin"
+  password: "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"  # sha256 of "password"
+
+server:
+  port: 5000
+  host: "0.0.0.0"
+
+storage:
+  database_path: "data.db"
+  visa_application_folder: "uploads/applications"
+  visa_folder: "uploads/visas"
