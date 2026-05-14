@@ -27,7 +27,7 @@
   --radius-sm: 8px;
   --radius-xs: 6px;
   --sidebar-w: 220px;
-  --font: 'Noto Sans SC', system-ui, sans-serif;
+  --font: 'Noto Sans SC', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Apple Color Emoji', system-ui, sans-serif;
   --mono: 'DM Mono', monospace;
 }
 
@@ -195,7 +195,7 @@ a { text-decoration: none; cursor: pointer; }
   margin-left: var(--sidebar-w);
   min-height: 100vh;
 }
-.page { display: none; padding: 28px; max-width: 1100px; }
+.page { display: none; padding: 28px; width: 100%; max-width: none; }
 .page.active { display: block; }
 
 /* ── Typography ── */
@@ -243,6 +243,10 @@ a { text-decoration: none; cursor: pointer; }
 .stat-value { font-size: 2rem; font-weight: 700; color: var(--text); line-height: 1; }
 .stat-card.accent { background: var(--accent-ultra); border-color: var(--accent-light); }
 .stat-card.accent .stat-value { color: var(--accent); }
+.stat-card.info { background: var(--info-light); border-color: #bfdbfe; }
+.stat-card.info .stat-value { color: #1d4ed8; }
+.stat-card.muted { background: var(--surface-2); border-color: var(--border); }
+.stat-card.muted .stat-value { color: var(--text-3); }
 
 /* ── Alert ── */
 .alert {
@@ -292,6 +296,7 @@ a { text-decoration: none; cursor: pointer; }
 .visa-card:hover { box-shadow: var(--shadow); transform: translateY(-1px); }
 .visa-card-top { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 12px; }
 .visa-country { font-size: 1.1rem; font-weight: 700; }
+.visa-card-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
 .visa-status-badge {
   font-size: .72rem;
   font-weight: 600;
@@ -303,6 +308,20 @@ a { text-decoration: none; cursor: pointer; }
 .status-pending { background: #fef3e2; color: #92400e; }
 .status-active { background: var(--success-light); color: var(--success); }
 .status-expired { background: var(--surface-2); color: var(--text-3); }
+.visa-expiry-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 20px;
+  font-size: .72rem;
+  font-weight: 700;
+  letter-spacing: .02em;
+  white-space: nowrap;
+}
+.visa-expiry-badge.soon { background: var(--warning-light); color: #92400e; }
+.visa-expiry-badge.expired { background: var(--danger-light); color: var(--danger); }
+.visa-card.visa-expiry-soon { border-color: var(--warning); box-shadow: 0 0 0 1px rgba(244,162,97,.15), var(--shadow-sm); }
+.visa-card.visa-expired { border-color: #fca5a5; }
 
 .visa-info { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
 .visa-info-item label { font-size: .72rem; color: var(--text-3); display: block; margin-bottom: 2px; text-transform: uppercase; letter-spacing: .03em; }
@@ -494,6 +513,33 @@ a { text-decoration: none; cursor: pointer; }
 .travel-item-country { font-weight: 600; font-size: .95rem; }
 .travel-item-meta { font-size: .8rem; color: var(--text-3); margin-top: 2px; }
 
+/* ── Travel type selector ── */
+.travel-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr);
+  gap: 20px;
+  align-items: start;
+}
+.travel-type-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--text-2);
+  background: transparent;
+  transition: all .15s;
+}
+.travel-type-option.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-ultra);
+}
+.travel-type-option input { width: auto; }
+
 /* ── Modal ── */
 .modal-overlay {
   position: fixed;
@@ -657,6 +703,10 @@ tr:hover td { background: var(--surface-2); }
   .form-row { grid-template-columns: 1fr; }
   .stats-grid { grid-template-columns: repeat(2, 1fr); }
   .travel-banner { flex-direction: column; text-align: center; }
+}
+
+@media (max-width: 980px) {
+  .travel-layout { grid-template-columns: 1fr; }
 }
 
 /* ── Scrollbar ── */

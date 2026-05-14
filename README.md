@@ -1,91 +1,38 @@
-# 🌏 个人国际旅行管理系统
+# 旅行管理系统
 
-单人使用的个人旅行管理工具，轻量 SaaS 风格界面，本地 SQLite 数据存储。
+这是一个面向个人使用的本地旅行与签证管理工具。后端基于 Flask，数据存储在 SQLite，本地即可运行。
+
+## 它能做什么
+
+- 查看旅行仪表盘和当前旅途状态
+- 管理签证信息、有效期和次数
+- 跟踪签证申请进度并上传文件
+- 记录入境、离境和历史行程
+- 自动同步部分签证状态变化
 
 ## 快速启动
 
-### 方式一：脚本启动（推荐）
+推荐在 Windows 上直接使用：
 ```bash
-chmod +x start.sh
-./start.sh
+uv run .\app.py
 ```
 
-### 方式二：手动启动
+如果你想手动启动，也可以先安装依赖再运行：
 ```bash
-python3 -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-python3 app.py
+python app.py
 ```
 
-访问 http://localhost:5000
+启动后访问 `http://localhost:5000`。
 
-## 默认凭证
+## 配置
 
-| 字段 | 值 |
-|------|-----|
-| 用户名 | `admin` |
-| 密码 | `password` |
+主要配置在 `config.yaml`，包括登录账号、服务端口和数据存储路径。默认情况下，程序会使用 `data.db` 作为数据库，并把上传文件保存在 `uploads/` 目录下。
 
-## 修改密码
+## 产品总结
 
-在 `config.yaml` 中，`password` 字段存储的是密码的 SHA-256 哈希值。
+这是一款轻量、私有、本地优先的旅行管理小产品，适合个人集中记录签证、申请材料和出入境轨迹，方便随时查看、追踪和回溯。
 
-生成新密码哈希：
-```bash
-python3 -c "import hashlib; print(hashlib.sha256('你的新密码'.encode()).hexdigest())"
-```
+## 生产维护
 
-## 配置文件 (config.yaml)
-
-```yaml
-auth:
-  username: "admin"
-  password: "sha256哈希值"
-
-server:
-  port: 5000
-  host: "0.0.0.0"
-
-storage:
-  database_path: "data.db"
-  visa_application_folder: "uploads/applications"
-  visa_folder: "uploads/visas"
-```
-
-## 功能模块
-
-| 模块 | 功能 |
-|------|------|
-| 🏠 仪表盘 | 旅行状态、签证到期提醒、统计概览 |
-| 🗂️ 签证管理 | 添加/管理签证，状态追踪，图片预览 |
-| 📋 签证申请 | 申请进度追踪，文件上传，自动创建签证 |
-| ✈️ 行程记录 | 入境/离境记录，自动更新签证状态 |
-| 📅 行程历史 | 按月分组的历史行程查询 |
-
-## 目录结构
-
-```
-travel-manager/
-├── app.py              # Flask 后端
-├── config.yaml         # 配置文件
-├── data.db             # SQLite 数据库（自动生成）
-├── requirements.txt    # Python 依赖
-├── start.sh            # 启动脚本
-├── uploads/
-│   ├── visas/          # 签证图片
-│   └── applications/   # 申请文件
-└── frontend/
-    ├── index.html      # SPA 入口
-    └── static/
-        ├── css/style.css
-        └── js/app.js
-```
-
-## 技术栈
-
-- **后端**: Python + Flask
-- **前端**: 原生 HTML/CSS/JS（无框架依赖）
-- **数据库**: SQLite
-- **认证**: Session-based
-- **样式**: Light SaaS，支持深色模式自动切换
+如果你后续要长期维护或交接，建议直接看 [PROD.md](PROD.md)。里面整理了启动方式、配置项、备份恢复和常见问题，适合当作运维手册使用。

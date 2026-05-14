@@ -162,6 +162,59 @@ function fileIcon(name) {
   return '📎';
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+const REGION_NAMES = typeof Intl !== 'undefined' && Intl.DisplayNames
+  ? new Intl.DisplayNames(['zh-CN'], { type: 'region' })
+  : null;
+
+function countryCodeFromInput(value) {
+  const text = (value || '').trim();
+  return /^[a-zA-Z]{2}$/.test(text) ? text.toUpperCase() : '';
+}
+
+function countryNameFromCode(code) {
+  const normalized = countryCodeFromInput(code);
+  if (!normalized) return '';
+  return REGION_NAMES ? (REGION_NAMES.of(normalized) || normalized) : normalized;
+}
+
+function countryFlagFromCode(code) {
+  const normalized = countryCodeFromInput(code);
+  if (!normalized) return '🌏';
+  // Convert to flag emoji: A=0x1F1E6, B=0x1F1E7, ... Z=0x1F1FF
+  const codePoints = [];
+  for (let i = 0; i < normalized.length; i++) {
+    codePoints.push(0x1F1E6 + (normalized.charCodeAt(i) - 'A'.charCodeAt(0)));
+  }
+  return String.fromCodePoint(...codePoints);
+}
+
+function countryLabel(country, countryCode) {
+  const code = countryCodeFromInput(countryCode) || countryCodeFromInput(country);
+  if (code) {
+    return `${countryFlagFromCode(code)} ${countryNameFromCode(code)}`;
+  }
+  return `🌏 ${country || '—'}`;
+}
+
+function fileUrl(filePath) {
+  if (!filePath) return '';
+  return `/api/files/${encodeURIComponent(String(filePath).replace(/\\/g, '/'))}`;
+}
+
+function countryPreviewHtml(inputValue) {
+  const code = countryCodeFromInput(inputValue);
+  return code ? `<div class="form-hint">识别为 ${escapeHtml(code)}，对应 ${escapeHtml(countryFlagFromCode(code))} ${escapeHtml(countryNameFromCode(code))}</div>` : '';
+}
+
 // ══════════════════════════════════════════════════════════
 // DASHBOARD
 // ══════════════════════════════════════════════════════════
@@ -185,8 +238,8 @@ function renderDashboard(el, data) {
     bannerHtml = `
       <div class="travel-banner">
         <div class="travel-banner-content">
-          <h2>✈️ 旅行中 · ${current_country}</h2>
-          <p>您目前正在 ${current_country}，已入境</p>
+          <h2>✈️ 旅行中 · ${countryLabel(current_country)}</h2>
+          <p>您目前正在 ${countryLabel(current_country)}，已入境</p>
         </div>
         <div class="travel-days">${days_in}<small style="font-size:.4em;opacity:.7"> 天</small></div>
       </div>`;
@@ -212,7 +265,7 @@ function renderDashboard(el, data) {
         <div class="warning-card" style="${warn ? '' : 'background:var(--success-light);border-color:var(--accent-light);'}">
           <div class="icon">${warn ? '⚠️' : '🛂'}</div>
           <div>
-            <strong style="${warn ? 'color:#92400e' : 'color:var(--accent)'}">${v.country} 签证${warn ? ' — 即将到期！' : ''}</strong>
+            <strong style="${warn ? 'color:#92400e' : 'color:var(--accent)'}">${countryLabel(v.country, v.country_code)} 签证${warn ? ' — 即将到期！' : ''}</strong>
             <p style="font-size:.83rem;margin-top:2px;color:var(--text-2);">
               有效期至 ${fmtDate(v.valid_to)} · ${remLabel} ·
               剩余次数：${v.remaining_entries < 0 ? '不限' : v.remaining_entries}
@@ -229,7 +282,7 @@ function renderDashboard(el, data) {
             ${t.type === 'entry' ? '🛬' : '🛫'}
           </div>
           <div class="travel-item-content">
-            <div class="travel-item-country">${t.country}</div>
+            <div class="travel-item-country">${countryLabel(t.country, t.country_code)}</div>
             <div class="travel-item-meta">${fmtDate(t.date)} · ${t.type === 'entry' ? '入境' : '离境'}${t.remarks ? ' · ' + t.remarks : ''}</div>
           </div>
         </div>`).join('')
@@ -240,10 +293,9 @@ function renderDashboard(el, data) {
     <div class="page-subtitle">${new Date().toLocaleDateString('zh-CN', {year:'numeric',month:'long',day:'numeric',weekday:'long'})}</div>
     ${bannerHtml}
     <div class="stats-grid">
-      <div class="stat-card"><div class="stat-label">待使用签证</div><div class="stat-value">${stats.pending}</div></div>
+      <div class="stat-card info"><div class="stat-label">待使用签证</div><div class="stat-value">${stats.pending}</div></div>
       <div class="stat-card accent"><div class="stat-label">生效中签证</div><div class="stat-value">${stats.active}</div></div>
-      <div class="stat-card"><div class="stat-label">已失效签证</div><div class="stat-value">${stats.expired}</div></div>
-      <div class="stat-card"><div class="stat-label">进行中申请</div><div class="stat-value">${stats.pending_applications}</div></div>
+      <div class="stat-card muted"><div class="stat-label">已失效签证</div><div class="stat-value">${stats.expired}</div></div>
     </div>
     ${alertsHtml ? `<div class="section-header"><div class="section-title">⚠️ 签证提醒</div></div>${alertsHtml}` : ''}
     <div class="section-header">
@@ -259,7 +311,7 @@ function renderDashboard(el, data) {
 // VISAS
 // ══════════════════════════════════════════════════════════
 
-let currentVisaFilter = 'all';
+let currentVisaFilter = 'valid';
 
 async function loadVisas() {
   const el = document.getElementById('page-visas');
@@ -273,24 +325,29 @@ async function loadVisas() {
 }
 
 function renderVisas(el, visas) {
-  const counts = { all: visas.length, pending: 0, active: 0, expired: 0 };
-  visas.forEach(v => counts[v.status]++);
+  const counts = { valid: 0, pending: 0, active: 0, expired: 0 };
+  visas.forEach(v => {
+    if (counts[v.status] != null) counts[v.status]++;
+    if (v.status === 'pending' || v.status === 'active') counts.valid++;
+  });
 
-  const filtered = currentVisaFilter === 'all' ? visas : visas.filter(v => v.status === currentVisaFilter);
+  const filtered = currentVisaFilter === 'valid'
+    ? visas.filter(v => v.status === 'pending' || v.status === 'active')
+    : visas.filter(v => v.status === currentVisaFilter);
 
-  const tabsHtml = ['all','pending','active','expired'].map(s =>
+  const tabsHtml = ['valid','pending','active','expired'].map(s =>
     `<button class="tab ${currentVisaFilter === s ? 'active' : ''}" onclick="filterVisas('${s}')" >
-      ${{ all: '全部', pending: '待使用', active: '生效中', expired: '已失效' }[s]} <span style="font-size:.75rem;opacity:.6">${counts[s]}</span>
+      ${{ valid: '有效签证', pending: '待使用', active: '生效中', expired: '已失效' }[s]} <span style="font-size:.75rem;opacity:.6">${counts[s]}</span>
     </button>`
   ).join('');
 
   const cardsHtml = filtered.length > 0
     ? `<div class="visa-grid">${filtered.map(visaCardHtml).join('')}</div>`
-    : `<div class="empty-state"><div class="icon">🗂️</div><p>暂无${currentVisaFilter === 'all' ? '' : { pending:'待使用', active:'生效中', expired:'已失效' }[currentVisaFilter]}签证</p></div>`;
+    : `<div class="empty-state"><div class="icon">🗂️</div><p>暂无${{ valid: '有效', pending:'待使用', active:'生效中', expired:'已失效' }[currentVisaFilter]}签证</p></div>`;
 
   el.innerHTML = `
     <div class="page-title">签证管理</div>
-    <div class="page-subtitle">管理您的所有签证信息</div>
+    <div class="page-subtitle">管理您的有效签证信息</div>
     <div class="section-header">
       <div class="tabs">${tabsHtml}</div>
       <button class="btn btn-primary" onclick="showAddVisaModal()">
@@ -311,23 +368,36 @@ function visaCardHtml(v) {
   const daysLeft = daysUntil(v.valid_to);
   const expirySoon = daysLeft !== null && daysLeft <= 7 && daysLeft >= 0;
   const expired = daysLeft !== null && daysLeft < 0;
+  const cardClass = [expirySoon ? 'visa-expiry-soon' : '', expired ? 'visa-expired' : ''].filter(Boolean).join(' ');
 
-  const imgHtml = v.file_path
-    ? `<img class="visa-img-thumb" src="/api/files/${encodeURIComponent(v.file_path)}" alt="签证图片" onclick="previewImg(this.src)">`
-    : '';
+  let imgHtml = '';
+  if (v.files && v.files.length > 0) {
+    imgHtml = `<div class="file-list">${v.files.map(f => `
+      <div class="file-item">
+        <span>${fileIcon(f.file_name)}</span>
+        <span class="file-item-name">${escapeHtml(f.file_name)}</span>
+        <a href="${fileUrl(f.file_path)}" target="_blank" class="btn btn-xs btn-secondary">查看</a>
+      </div>`).join('')}</div>`;
+  } else if (v.file_path) {
+    const fname = v.file_name || (v.file_path || '').split('/').pop() || '附件';
+    imgHtml = `<div class="file-list"><div class="file-item"><span>${fileIcon(fname)}</span><span class="file-item-name">${escapeHtml(fname)}</span><a href="${fileUrl(v.file_path)}" target="_blank" class="btn btn-xs btn-secondary">查看</a></div></div>`;
+  }
 
   const entriesDisplay = v.total_entries < 0
     ? `<div class="entries-bar"><span class="tag">不限次数</span></div>`
     : entriesHtml(Math.min(v.total_entries, 10), v.used_entries);
 
   return `
-    <div class="visa-card" id="visa-${v.id}">
-      ${expirySoon || expired ? `<div style="position:absolute;top:12px;right:12px;font-size:.75rem;background:${expired ? 'var(--danger)' : 'var(--warning)'};color:white;padding:2px 8px;border-radius:20px;font-weight:600;">
-        ${expired ? '已过期' : `${daysLeft}天后到期`}
-      </div>` : ''}
+    <div class="visa-card ${cardClass}" id="visa-${v.id}">
       <div class="visa-card-top">
-        <div class="visa-country">🌏 ${v.country}</div>
-        <span class="visa-status-badge ${statusClass(v.status)}">${statusLabel(v.status)}</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <div class="visa-country">${countryLabel(v.country, v.country_code)}</div>
+          ${v.visa_type ? `<span class="tag">${escapeHtml(v.visa_type)}</span>` : ''}
+        </div>
+        <div class="visa-card-meta">
+          ${expirySoon || expired ? `<span class="visa-expiry-badge ${expired ? 'expired' : 'soon'}">${expired ? '已过期' : `${daysLeft}天后到期`}</span>` : ''}
+          <span class="visa-status-badge ${statusClass(v.status)}">${statusLabel(v.status)}</span>
+        </div>
       </div>
       ${imgHtml}
       ${entriesDisplay}
@@ -345,6 +415,10 @@ function visaCardHtml(v) {
           <span style="font-family:var(--mono);font-size:.82rem">${v.visa_number || '—'}</span>
         </div>
         <div class="visa-info-item">
+          <label>国家/地区二字码</label>
+          <span>${v.country_code || '—'}</span>
+        </div>
+        <div class="visa-info-item">
           <label>添加时间</label>
           <span>${fmtDate(v.created_at)}</span>
         </div>
@@ -353,6 +427,7 @@ function visaCardHtml(v) {
       <div class="visa-card-actions">
         ${v.status !== 'expired' ? `<button class="btn btn-sm btn-danger" onclick="expireVisa(${v.id})">结束签证</button>` : ''}
         ${v.status === 'pending' ? `<button class="btn btn-sm btn-secondary" onclick="activateVisa(${v.id})">手动激活</button>` : ''}
+        <button class="btn btn-sm btn-secondary" onclick="showEditVisaModal(${v.id})">编辑</button>
         <button class="btn btn-sm btn-secondary" onclick="showVisaHistory(${v.id})">变更历史</button>
         <button class="btn btn-sm btn-danger" style="margin-left:auto" onclick="deleteVisa(${v.id})">删除</button>
       </div>
@@ -361,7 +436,11 @@ function visaCardHtml(v) {
 
 function showAddVisaModal() {
   openModal('添加签证', `
-    <div class="form-group"><label>签证国家 *</label><input type="text" id="v-country" placeholder="例：日本"></div>
+    <div class="form-group">
+      <label>签证国家/地区二字码 *</label>
+      <input type="text" id="v-country" placeholder="例：CN" oninput="document.getElementById('v-country-preview').innerHTML = countryPreviewHtml(this.value)">
+      <div id="v-country-preview">${countryPreviewHtml('')}</div>
+    </div>
     <div class="form-row">
       <div class="form-group"><label>有效期起</label><input type="date" id="v-from"></div>
       <div class="form-group"><label>有效期止</label><input type="date" id="v-to"></div>
@@ -379,9 +458,10 @@ function showAddVisaModal() {
       </div>
       <div class="form-group"><label>签证号码</label><input type="text" id="v-number" placeholder="可选"></div>
     </div>
+    <div class="form-group"><label>签证类型</label><input type="text" id="v-type" placeholder="例：B1/B2、V44等（可选）"></div>
     <div class="form-group"><label>备注</label><textarea id="v-remarks" rows="2" placeholder="可选"></textarea></div>
     <div class="form-group">
-      <label>签证页图片</label>
+      <label>签证附件</label>
       <input type="file" id="v-file" accept="image/*,.pdf">
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
@@ -392,12 +472,15 @@ function showAddVisaModal() {
 
 async function submitAddVisa() {
   const country = document.getElementById('v-country').value.trim();
-  if (!country) { toast('请填写签证国家', 'error'); return; }
+  if (!country) { toast('请填写国家/地区二字码', 'error'); return; }
   const fd = new FormData();
   fd.append('country', country);
+  const countryCode = countryCodeFromInput(country);
+  if (countryCode) fd.append('country_code', countryCode);
   fd.append('valid_from', document.getElementById('v-from').value);
   fd.append('valid_to', document.getElementById('v-to').value);
   fd.append('total_entries', document.getElementById('v-entries').value);
+  fd.append('visa_type', document.getElementById('v-type').value);
   fd.append('visa_number', document.getElementById('v-number').value);
   fd.append('remarks', document.getElementById('v-remarks').value);
   const fileEl = document.getElementById('v-file');
@@ -405,6 +488,71 @@ async function submitAddVisa() {
   try {
     await POST('/visas', fd, true);
     toast('签证已添加');
+    closeModal();
+    loadVisas();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function showEditVisaModal(id) {
+  try {
+    const data = await GET(`/visas/${id}`);
+    const v = data.visa;
+    openModal('编辑签证', `
+      <div class="form-group">
+        <label>签证国家/地区二字码 *</label>
+        <input type="text" id="ev-country" value="${escapeHtml(v.country || '')}" placeholder="例：CN" oninput="document.getElementById('ev-country-preview').innerHTML = countryPreviewHtml(this.value)">
+        <div id="ev-country-preview">${countryPreviewHtml(v.country_code || v.country || '')}</div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>有效期起</label><input type="date" id="ev-from" value="${escapeHtml(v.valid_from || '')}"></div>
+        <div class="form-group"><label>有效期止</label><input type="date" id="ev-to" value="${escapeHtml(v.valid_to || '')}"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>可用次数</label>
+          <select id="ev-entries">
+            <option value="1" ${String(v.total_entries) === '1' ? 'selected' : ''}>单次</option>
+            <option value="2" ${String(v.total_entries) === '2' ? 'selected' : ''}>双次</option>
+            <option value="3" ${String(v.total_entries) === '3' ? 'selected' : ''}>三次</option>
+            <option value="5" ${String(v.total_entries) === '5' ? 'selected' : ''}>五次</option>
+            <option value="-1" ${String(v.total_entries) === '-1' ? 'selected' : ''}>不限次数（多次）</option>
+          </select>
+        </div>
+        <div class="form-group"><label>签证号码</label><input type="text" id="ev-number" value="${escapeHtml(v.visa_number || '')}" placeholder="可选"></div>
+      </div>
+      <div class="form-group"><label>签证类型</label><input type="text" id="ev-type" value="${escapeHtml(v.visa_type || '')}" placeholder="例：B1/B2、V44等（可选）"></div>
+      <div class="form-group"><label>备注</label><textarea id="ev-remarks" rows="2" placeholder="可选">${escapeHtml(v.remarks || '')}</textarea></div>
+      <div class="form-group">
+        <label>当前状态</label>
+        <select id="ev-status">
+          ${['pending','active','expired'].map(s => `<option value="${s}" ${v.status === s ? 'selected' : ''}>${statusLabel(s)}</option>`).join('')}
+        </select>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+        <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" onclick="submitEditVisa(${id})">保存</button>
+      </div>`);
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function submitEditVisa(id) {
+  const country = document.getElementById('ev-country').value.trim();
+  if (!country) { toast('请填写国家/地区二字码', 'error'); return; }
+  const countryCode = countryCodeFromInput(country);
+  try {
+    await PUT(`/visas/${id}`, {
+      country,
+      country_code: countryCode || null,
+      valid_from: document.getElementById('ev-from').value,
+      valid_to: document.getElementById('ev-to').value,
+      total_entries: parseInt(document.getElementById('ev-entries').value, 10),
+      visa_type: document.getElementById('ev-type').value,
+      visa_number: document.getElementById('ev-number').value,
+      remarks: document.getElementById('ev-remarks').value,
+      status: document.getElementById('ev-status').value,
+      reason: '编辑签证'
+    });
+    toast('签证已更新');
     closeModal();
     loadVisas();
   } catch(e) { toast(e.message, 'error'); }
@@ -459,7 +607,7 @@ async function showVisaHistory(id) {
             ${h.reason ? `<div class="timeline-note">${h.reason}</div>` : ''}
           </div>`).join('')}</div>`
       : '<p style="color:var(--text-3)">暂无变更记录</p>';
-    openModal(`${data.visa.country} 签证状态历史`, histHtml);
+    openModal(`${countryLabel(data.visa.country, data.visa.country_code)} 签证状态历史`, histHtml);
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -469,6 +617,17 @@ function previewImg(src) {
   overlay.innerHTML = `<img src="${src}" alt="预览">`;
   overlay.onclick = () => overlay.remove();
   document.body.appendChild(overlay);
+}
+
+function previewFile(url, path) {
+  const ext = (String(path || '')).split('.').pop().toLowerCase();
+  if (['pdf'].includes(ext)) {
+    window.open(url, '_blank');
+  } else if (['jpg','jpeg','png','gif','webp'].includes(ext)) {
+    previewImg(url);
+  } else {
+    window.open(url, '_blank');
+  }
 }
 
 // ══════════════════════════════════════════════════════════
@@ -512,8 +671,8 @@ function appCardHtml(a) {
     <div class="app-card">
       <div class="app-card-header" onclick="toggleAppCard(${a.id})">
         <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
-          <div style="font-size:1rem;font-weight:700;white-space:nowrap">🌏 ${a.country}</div>
-          ${a.application_type ? `<span class="tag">${a.application_type}</span>` : ''}
+          <div style="font-size:1rem;font-weight:700;white-space:nowrap">${countryLabel(a.country, a.country_code)}</div>
+          ${a.visa_type ? `<span class="tag">${escapeHtml(a.visa_type)}</span>` : ''}
         </div>
         <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
           <div style="font-size:.82rem;color:var(--text-2)">${a.current_status}</div>
@@ -525,7 +684,8 @@ function appCardHtml(a) {
       <div class="app-card-body" id="app-body-${a.id}">
         <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:16px">
           <div><div class="stat-label">申请日期</div><div style="font-weight:600">${fmtDate(a.apply_date)}</div></div>
-          <div><div class="stat-label">申请类型</div><div style="font-weight:600">${a.application_type || '—'}</div></div>
+          <div><div class="stat-label">签证类型</div><div style="font-weight:600">${a.visa_type || '—'}</div></div>
+          <div><div class="stat-label">申请次数</div><div style="font-weight:600">${a.total_entries == null ? '1' : (a.total_entries < 0 ? '不限次数' : a.total_entries + ' 次')}</div></div>
           <div><div class="stat-label">当前状态</div><div style="font-weight:600">${a.current_status}</div></div>
           <div><div class="stat-label">签证结果</div><div style="font-weight:600;display:flex;align-items:center">${resultDotHtml(a.visa_result)}</div></div>
         </div>
@@ -550,7 +710,8 @@ function appCardHtml(a) {
               <div class="file-item">
                 <span>${fileIcon(f.file_name)}</span>
                 <span class="file-item-name">${f.file_name}</span>
-                <a href="/api/files/${encodeURIComponent(f.file_path)}" target="_blank" class="btn btn-xs btn-secondary">查看</a>
+                <a href="${fileUrl(f.file_path)}" target="_blank" class="btn btn-xs btn-secondary">查看</a>
+                <button class="remove" title="删除文件" onclick="deleteApplicationFile(${a.id}, ${f.id})">×</button>
               </div>`).join('')}
           </div>` : ''}
 
@@ -573,19 +734,25 @@ function toggleAppCard(id) {
 function showAddApplicationModal() {
   openModal('新建签证申请', `
     <div class="form-row">
-      <div class="form-group"><label>申请国家 *</label><input type="text" id="ap-country" placeholder="例：法国"></div>
       <div class="form-group">
-        <label>申请类型</label>
-        <select id="ap-type">
-          <option value="">请选择...</option>
-          <option value="旅游">旅游</option>
-          <option value="商务">商务</option>
-          <option value="探亲">探亲</option>
-          <option value="学习">学习</option>
-          <option value="工作">工作</option>
-          <option value="其他">其他</option>
-        </select>
+        <label>申请国家/地区二字码 *</label>
+        <input type="text" id="ap-country" placeholder="例：CN" oninput="document.getElementById('ap-country-preview').innerHTML = countryPreviewHtml(this.value)">
+        <div id="ap-country-preview">${countryPreviewHtml('')}</div>
       </div>
+      <div class="form-group">
+        <label>签证类型</label>
+        <input type="text" id="ap-visa-type" placeholder="例：B1/B2、V44等（可选）">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>签证次数</label>
+      <select id="ap-entries">
+        <option value="1">单次</option>
+        <option value="2">双次</option>
+        <option value="3">三次</option>
+        <option value="5">五次</option>
+        <option value="-1">不限次数（多次）</option>
+      </select>
     </div>
     <div class="form-group"><label>申请日期</label><input type="date" id="ap-date" value="${new Date().toISOString().slice(0,10)}"></div>
     <div class="form-group"><label>备注</label><textarea id="ap-remarks" rows="2" placeholder="可选"></textarea></div>
@@ -601,10 +768,13 @@ function showAddApplicationModal() {
 
 async function submitAddApplication() {
   const country = document.getElementById('ap-country').value.trim();
-  if (!country) { toast('请填写申请国家', 'error'); return; }
+  if (!country) { toast('请填写国家/地区二字码', 'error'); return; }
   const fd = new FormData();
   fd.append('country', country);
-  fd.append('application_type', document.getElementById('ap-type').value);
+  const countryCode = countryCodeFromInput(country);
+  if (countryCode) fd.append('country_code', countryCode);
+  fd.append('visa_type', document.getElementById('ap-visa-type').value);
+  fd.append('total_entries', document.getElementById('ap-entries').value);
   fd.append('apply_date', document.getElementById('ap-date').value);
   fd.append('remarks', document.getElementById('ap-remarks').value);
   const files = document.getElementById('ap-files').files;
@@ -665,19 +835,11 @@ function showUpdateResultModal(id, country, currentResult) {
       </div>
       <div class="form-row">
         <div class="form-group"><label>签证号码</label><input type="text" id="ri-number"></div>
-        <div class="form-group">
-          <label>次数</label>
-          <select id="ri-entries">
-            <option value="1">单次</option>
-            <option value="2">双次</option>
-            <option value="-1">不限次数（多次）</option>
-          </select>
-        </div>
       </div>
     </div>
     <div id="downgrade-fields" class="hidden">
       <div class="alert alert-warning">降级签发 — 请填写实际签发的签证信息。</div>
-      <div class="form-group"><label>实际签发国家</label><input type="text" id="rd-country" value="${country}"></div>
+      <div class="form-group"><label>实际签发国家/地区二字码</label><input type="text" id="rd-country" value="${country}"></div>
       <div class="form-row">
         <div class="form-group"><label>有效期起</label><input type="date" id="rd-from"></div>
         <div class="form-group"><label>有效期止</label><input type="date" id="rd-to"></div>
@@ -689,6 +851,7 @@ function showUpdateResultModal(id, country, currentResult) {
           <select id="rd-entries"><option value="1">单次</option><option value="-1">不限次数</option></select>
         </div>
       </div>
+      <div class="form-group"><label>签证类型</label><input type="text" id="rd-type" placeholder="例：B1/B2、V44等（可选）"></div>
       <div class="form-group"><label>备注</label><textarea id="rd-remarks" rows="2"></textarea></div>
     </div>
     <div class="form-group"><label>结果说明</label><textarea id="result-note" rows="2" placeholder="可选"></textarea></div>
@@ -714,14 +877,17 @@ async function submitUpdateResult(id) {
     body.valid_from = document.getElementById('ri-from').value;
     body.valid_to = document.getElementById('ri-to').value;
     body.visa_number = document.getElementById('ri-number').value;
-    body.total_entries = parseInt(document.getElementById('ri-entries').value);
   } else if (result === '降级签发') {
+    const downgradeCountry = document.getElementById('rd-country').value.trim();
+    const downgradeCountryCode = countryCodeFromInput(downgradeCountry);
     body.visa_info = {
-      country: document.getElementById('rd-country').value,
+      country: downgradeCountry,
+      country_code: downgradeCountryCode || null,
       valid_from: document.getElementById('rd-from').value,
       valid_to: document.getElementById('rd-to').value,
       visa_number: document.getElementById('rd-number').value,
-      total_entries: parseInt(document.getElementById('rd-entries').value),
+      total_entries: parseInt(document.getElementById('rd-entries').value, 10),
+      visa_type: document.getElementById('rd-type') ? document.getElementById('rd-type').value : undefined,
       remarks: document.getElementById('rd-remarks').value
     };
   }
@@ -768,6 +934,15 @@ async function deleteApplication(id) {
   } catch(e) { toast(e.message, 'error'); }
 }
 
+async function deleteApplicationFile(appId, fileId) {
+  if (!confirm('确定删除该文件？')) return;
+  try {
+    await DELETE(`/applications/${appId}/files/${fileId}`);
+    toast('文件已删除');
+    loadApplications();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
 // ══════════════════════════════════════════════════════════
 // TRAVELS
 // ══════════════════════════════════════════════════════════
@@ -786,9 +961,12 @@ async function loadTravels() {
 function renderTravels(el, travels, visas) {
   const recent = travels.slice(0, 15);
   const pendingVisas = visas.filter(v => v.status === 'pending' || v.status === 'active');
+  const latestTravel = travels[0] || null;
+  const inTravel = latestTravel ? latestTravel.type === 'entry' : false;
+  const selectedTravelType = inTravel ? 'exit' : 'entry';
 
   const visaOptions = pendingVisas.map(v =>
-    `<option value="${v.id}">[${statusLabel(v.status)}] ${v.country} ${v.valid_to ? '(至' + fmtDate(v.valid_to) + ')' : ''}</option>`
+    `<option value="${v.id}" data-country-code="${escapeHtml(v.country_code || '')}" data-country="${escapeHtml((v.country || '').toLowerCase())}">[${statusLabel(v.status)}] ${countryLabel(v.country, v.country_code)}${v.visa_type ? ' (' + escapeHtml(v.visa_type) + ')' : ''} ${v.valid_to ? '(至' + fmtDate(v.valid_to) + ')' : ''}</option>`
   ).join('');
 
   const listHtml = recent.length > 0
@@ -796,8 +974,8 @@ function renderTravels(el, travels, visas) {
         <div class="travel-item">
           <div class="travel-type-icon ${t.type}">${t.type === 'entry' ? '🛬' : '🛫'}</div>
           <div class="travel-item-content">
-            <div class="travel-item-country">${t.country} <span style="font-size:.8rem;color:var(--text-3);font-weight:400">${t.type === 'entry' ? '入境' : '离境'}</span></div>
-            <div class="travel-item-meta">${fmtDate(t.date)}${t.remarks ? ' · ' + t.remarks : ''}${t.visa_country ? ' · 使用签证: ' + t.visa_country : ''}</div>
+            <div class="travel-item-country">${countryLabel(t.country, t.country_code)} <span style="font-size:.8rem;color:var(--text-3);font-weight:400">${t.type === 'entry' ? '入境' : '离境'}</span></div>
+            <div class="travel-item-meta">${fmtDate(t.date)}${t.remarks ? ' · ' + t.remarks : ''}${t.visa_country ? ' · 使用签证: ' + countryLabel(t.visa_country) : ''}</div>
           </div>
           <button class="btn btn-xs btn-danger" onclick="deleteTravel(${t.id})">×</button>
         </div>`).join('')
@@ -806,22 +984,25 @@ function renderTravels(el, travels, visas) {
   el.innerHTML = `
     <div class="page-title">行程记录</div>
     <div class="page-subtitle">记录入境与离境行程</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start" class="travel-layout">
+    <div class="travel-layout">
       <div class="card">
         <div class="card-header"><div class="card-title">添加行程</div></div>
         <div class="card-body">
           <div class="form-group">
             <label>行程类型</label>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-              <label style="display:flex;align-items:center;gap:8px;padding:10px;border:1.5px solid var(--accent);border-radius:var(--radius-xs);cursor:pointer;font-weight:500;color:var(--accent);background:var(--accent-ultra)">
-                <input type="radio" name="ttype" value="entry" checked style="width:auto"> 🛬 入境
+              <label id="travel-type-entry" class="travel-type-option ${selectedTravelType === 'entry' ? 'active' : ''}">
+                <input type="radio" name="ttype" value="entry" ${selectedTravelType === 'entry' ? 'checked' : ''} onchange="updateTravelTypeSelection(this.value)" style="width:auto"> 🛬 入境
               </label>
-              <label style="display:flex;align-items:center;gap:8px;padding:10px;border:1.5px solid var(--border);border-radius:var(--radius-xs);cursor:pointer;font-weight:500">
-                <input type="radio" name="ttype" value="exit" style="width:auto"> 🛫 离境
+              <label id="travel-type-exit" class="travel-type-option ${selectedTravelType === 'exit' ? 'active' : ''}">
+                <input type="radio" name="ttype" value="exit" ${selectedTravelType === 'exit' ? 'checked' : ''} onchange="updateTravelTypeSelection(this.value)" style="width:auto"> 🛫 离境
               </label>
             </div>
           </div>
-          <div class="form-group"><label>国家/地区 *</label><input type="text" id="t-country" placeholder="例：日本"></div>
+          <div class="form-group">
+            <label>国家/地区二字码 *</label>
+            <input type="text" id="t-country" placeholder="例：CN" oninput="document.getElementById('t-country-preview').innerHTML = countryPreviewHtml(this.value); autoMatchTravelVisa()">
+          </div>
           <div class="form-group"><label>日期</label><input type="date" id="t-date" value="${new Date().toISOString().slice(0,10)}"></div>
           <div class="form-group">
             <label>关联签证（可选）</label>
@@ -830,6 +1011,7 @@ function renderTravels(el, travels, visas) {
               ${visaOptions}
             </select>
             <div class="form-hint">入境时选择签证将自动更新签证状态</div>
+            <div class="form-hint" id="t-visa-match-hint"></div>
           </div>
           <div class="form-group"><label>备注</label><textarea id="t-remarks" rows="2" placeholder="可选"></textarea></div>
           <button class="btn btn-primary btn-block" onclick="submitAddTravel()">记录行程</button>
@@ -846,21 +1028,74 @@ function renderTravels(el, travels, visas) {
       </div>
     </div>`;
 
-  // Responsive
-  const layout = el.querySelector('.travel-layout');
-  if (window.innerWidth < 700) layout.style.gridTemplateColumns = '1fr';
+  updateTravelTypeSelection(selectedTravelType);
+}
+
+function updateTravelTypeSelection(selectedType) {
+  const entryOption = document.getElementById('travel-type-entry');
+  const exitOption = document.getElementById('travel-type-exit');
+  if (!entryOption || !exitOption) return;
+
+  const entryActive = selectedType === 'entry';
+  entryOption.classList.toggle('active', entryActive);
+  exitOption.classList.toggle('active', !entryActive);
+}
+
+function autoMatchTravelVisa() {
+  const countryInput = document.getElementById('t-country');
+  const visaSelect = document.getElementById('t-visa');
+  const hintEl = document.getElementById('t-visa-match-hint');
+  if (!countryInput || !visaSelect) return;
+
+  const input = (countryInput.value || '').trim();
+  const code = countryCodeFromInput(input);
+
+  if (!code) {
+    if (hintEl) hintEl.textContent = '';
+    return;
+  }
+
+  let matchedOption = null;
+  for (const opt of visaSelect.options) {
+    if (!opt.value) continue;
+    const optCode = countryCodeFromInput(opt.dataset.countryCode || '');
+    if (optCode && optCode === code) {
+      matchedOption = opt;
+      break;
+    }
+  }
+
+  if (matchedOption) {
+    visaSelect.value = matchedOption.value;
+    if (hintEl) hintEl.textContent = `已自动匹配签证：${matchedOption.textContent}`;
+  } else if (hintEl) {
+    hintEl.textContent = `未找到 ${code} 对应签证，请手动选择`;
+  }
 }
 
 async function submitAddTravel() {
   const country = document.getElementById('t-country').value.trim();
-  if (!country) { toast('请填写国家', 'error'); return; }
+  if (!country) { toast('请填写国家/地区二字码', 'error'); return; }
   const type = document.querySelector('input[name="ttype"]:checked').value;
   const date = document.getElementById('t-date').value;
-  const visa_id = document.getElementById('t-visa').value || null;
+  let visa_id = document.getElementById('t-visa').value || null;
   const remarks = document.getElementById('t-remarks').value;
+  const countryCode = countryCodeFromInput(country);
   try {
-    await POST('/travels', { country, type, date, visa_id: visa_id ? parseInt(visa_id) : null, remarks });
-    toast(`行程已记录 (${type === 'entry' ? '入境' : '离境'})`);
+    const res = await POST('/travels', {
+      country,
+      country_code: countryCode || null,
+      type,
+      date,
+      visa_id: visa_id ? parseInt(visa_id, 10) : null,
+      remarks,
+      enable_auto_match: true
+    });
+    let msg = `行程已记录 (${type === 'entry' ? '入境' : '离境'})`;
+    if (res.matched_visa_country) {
+      msg += ` · 自动匹配签证: ${countryLabel(res.matched_visa_country)}`;
+    }
+    toast(msg);
     loadTravels();
   } catch(e) { toast(e.message, 'error'); }
 }
@@ -895,29 +1130,120 @@ function renderHistory(el, travels) {
     return;
   }
 
-  // Group by year-month
-  const groups = {};
-  travels.forEach(t => {
-    const ym = t.date.slice(0, 7);
-    if (!groups[ym]) groups[ym] = [];
-    groups[ym].push(t);
+  const sorted = [...travels].sort((a, b) => {
+    const byDate = new Date(a.date) - new Date(b.date);
+    if (byDate !== 0) return byDate;
+    // Keep real operation sequence on same day.
+    return (a.id || 0) - (b.id || 0);
+  });
+  const trips = [];
+  let currentOpenEntry = null;
+
+  sorted.forEach((t) => {
+    if (t.type === 'entry') {
+      if (currentOpenEntry) {
+        trips.push({ entry: currentOpenEntry, exit: null });
+      }
+      currentOpenEntry = t;
+      return;
+    }
+
+    if (t.type === 'exit') {
+      if (currentOpenEntry) {
+        trips.push({ entry: currentOpenEntry, exit: t });
+        currentOpenEntry = null;
+      } else {
+        trips.push({ entry: null, exit: t });
+      }
+    }
   });
 
-  const groupsHtml = Object.keys(groups).sort().reverse().map(ym => {
+  if (currentOpenEntry) {
+    trips.push({ entry: currentOpenEntry, exit: null });
+  }
+
+  const tripLatestEvent = (trip) => trip.exit || trip.entry || null;
+  trips.sort((a, b) => {
+    const ae = tripLatestEvent(a);
+    const be = tripLatestEvent(b);
+    const ad = ae?.date || '';
+    const bd = be?.date || '';
+    const byDate = new Date(bd) - new Date(ad);
+    if (byDate !== 0) return byDate;
+    return (be?.id || 0) - (ae?.id || 0);
+  });
+
+  const tripGroups = {};
+  trips.forEach(trip => {
+    const groupDate = trip.exit?.date || trip.entry?.date;
+    const ym = groupDate ? groupDate.slice(0, 7) : '未知时间';
+    if (!tripGroups[ym]) tripGroups[ym] = [];
+    tripGroups[ym].push(trip);
+  });
+
+  const groupsHtml = Object.keys(tripGroups).sort((a, b) => {
+    if (a === '未知时间') return 1;
+    if (b === '未知时间') return -1;
+    return b.localeCompare(a);
+  }).map(ym => {
     const [year, month] = ym.split('-');
-    const items = groups[ym].map(t => `
-      <div class="travel-item">
-        <div class="travel-type-icon ${t.type}">${t.type === 'entry' ? '🛬' : '🛫'}</div>
-        <div class="travel-item-content">
-          <div class="travel-item-country">${t.country} <span style="font-size:.8rem;color:var(--text-3);font-weight:400">${t.type === 'entry' ? '入境' : '离境'}</span></div>
-          <div class="travel-item-meta">${fmtDate(t.date)}${t.remarks ? ' · ' + t.remarks : ''}${t.visa_country ? ' · 签证: ' + t.visa_country : ''}</div>
-        </div>
+    const stayDurationText = (trip) => {
+      const entryDate = trip.entry?.date;
+      if (!entryDate) return '';
+      const endDate = trip.exit?.date || new Date().toISOString().slice(0, 10);
+      const start = new Date(`${entryDate}T00:00:00`);
+      const end = new Date(`${endDate}T00:00:00`);
+      const diffDays = Math.max(0, Math.floor((end - start) / 86400000));
+
+      if (trip.exit) {
+        return diffDays === 0 ? '停留时长：当日往返' : `停留时长：${diffDays} 天`;
+      }
+      return `停留时长：已停留 ${diffDays} 天`;
+    };
+
+    const items = tripGroups[ym].sort((a, b) => {
+      const ae = tripLatestEvent(a);
+      const be = tripLatestEvent(b);
+      const ad = ae?.date || '';
+      const bd = be?.date || '';
+      const byDate = new Date(bd) - new Date(ad);
+      if (byDate !== 0) return byDate;
+      return (be?.id || 0) - (ae?.id || 0);
+    }).map(trip => `
+      <div style="padding:12px;background:var(--surface-2);border-radius:var(--radius-xs);margin-bottom:8px;">
+        ${trip.exit ? `
+          <div class="travel-item" style="margin-bottom:4px;">
+            <div class="travel-type-icon exit" style="color:var(--text-3);">🛫</div>
+            <div class="travel-item-content">
+              <div class="travel-item-country" style="font-weight:600;">${countryLabel(trip.exit.country, trip.exit.country_code)} 离境</div>
+              <div class="travel-item-meta">${fmtDate(trip.exit.date)}${trip.exit.remarks ? ' · ' + trip.exit.remarks : ''}</div>
+            </div>
+          </div>
+        ` : `
+          <div style="padding:8px;color:var(--text-3);font-size:.85rem;margin-bottom:8px;background:var(--surface);border-radius:var(--radius-xs);">进行中的旅行</div>
+        `}
+        ${trip.entry ? `
+          <div class="travel-item" style="${trip.exit ? 'border-top:1px solid var(--border);padding-top:8px;' : ''}">
+            <div class="travel-type-icon entry" style="color:var(--accent);">🛬</div>
+            <div class="travel-item-content">
+              <div class="travel-item-country" style="font-weight:600;">${countryLabel(trip.entry.country, trip.entry.country_code)} 入境</div>
+              <div class="travel-item-meta">${fmtDate(trip.entry.date)}${trip.entry.remarks ? ' · ' + trip.entry.remarks : ''}${trip.entry.visa_country ? ' · 签证: ' + countryLabel(trip.entry.visa_country) : ''}</div>
+            </div>
+          </div>
+        ` : `
+          <div class="travel-item">
+            <div class="travel-item-content">
+              <div class="travel-item-meta">无对应入境记录</div>
+            </div>
+          </div>
+        `}
+        <div class="travel-item-meta" style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);font-weight:600;color:var(--text-2);">${stayDurationText(trip)}</div>
       </div>`).join('');
 
     return `
       <div style="margin-bottom:24px">
         <div style="font-size:.82rem;font-weight:700;color:var(--text-3);letter-spacing:.08em;text-transform:uppercase;margin-bottom:10px;display:flex;align-items:center;gap:8px">
-          <span>${year}年${month}月</span>
+          <span>${year && month ? `${year}年${month}月` : '未知时间'}</span>
           <span style="height:1px;flex:1;background:var(--border)"></span>
         </div>
         <div class="card">${items}</div>
@@ -926,7 +1252,7 @@ function renderHistory(el, travels) {
 
   el.innerHTML = `
     <div class="page-title">行程历史</div>
-    <div class="page-subtitle">共 ${travels.length} 条行程记录</div>
+    <div class="page-subtitle">共 ${trips.length} 次旅行</div>
     ${groupsHtml}`;
 }
 

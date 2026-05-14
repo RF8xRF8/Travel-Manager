@@ -26,6 +26,7 @@ CONFIG = load_config()
 AUTH = CONFIG.get("auth", {})
 SERVER = CONFIG.get("server", {"port": 5000, "host": "0.0.0.0"})
 STORAGE = CONFIG.get("storage", {})
+APP_SETTINGS = CONFIG.get("app", {})
 
 DB_PATH = STORAGE.get("database_path", "data.db")
 VISA_FOLDER = STORAGE.get("visa_folder", "uploads/visas")
@@ -37,13 +38,80 @@ for folder in [VISA_FOLDER, APP_FOLDER]:
 # ─── App ──────────────────────────────────────────────────────────────────────
 
 app = Flask(__name__, static_folder="frontend/static", template_folder="frontend")
-app.secret_key = os.urandom(32)
+app.secret_key = os.environ.get("TRAVEL_MANAGER_SECRET_KEY") or APP_SETTINGS.get("secret_key") or os.urandom(32)
 CORS(app, supports_credentials=True)
 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "pdf", "webp"}
 
+BASE_DIR = os.path.dirname(__file__)
+
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def is_country_code(value):
+    return isinstance(value, str) and len(value.strip()) == 2 and value.strip().isalpha()
+
+
+def normalize_country_code(value):
+    if not is_country_code(value):
+        return None
+    return value.strip().upper()
+
+
+def normalize_storage_path(path):
+    if not path:
+        return None
+    if os.path.isabs(path):
+        return os.path.relpath(path, BASE_DIR).replace("\\", "/")
+    return path.replace("\\", "/")
+
+
+def resolve_storage_path(path):
+    if not path:
+        return None
+    normalized = path.replace("\\", os.sep).replace("/", os.sep)
+    full = normalized if os.path.isabs(normalized) else os.path.normpath(os.path.join(BASE_DIR, normalized))
+    base = os.path.normpath(BASE_DIR)
+    if os.path.commonpath([base, os.path.normpath(full)]) != base:
+        return None
+    return full
+
+
+def stored_file_path(folder, filename):
+    return normalize_storage_path(os.path.join(folder, filename))
+
+
+def remove_storage_file(path):
+    full_path = resolve_storage_path(path)
+    if full_path and os.path.exists(full_path):
+        os.remove(full_path)
+
+
+def find_matching_visa(conn, country, country_code):
+    if country_code:
+        row = conn.execute(
+            """SELECT * FROM visas
+               WHERE country_code=? AND status IN ('pending', 'active')
+               ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, valid_to IS NULL, valid_to, id DESC
+               LIMIT 1""",
+            (country_code,)
+        ).fetchone()
+        if row:
+            return row
+
+    if country:
+        row = conn.execute(
+            """SELECT * FROM visas
+               WHERE lower(country)=lower(?) AND status IN ('pending', 'active')
+               ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, valid_to IS NULL, valid_to, id DESC
+               LIMIT 1""",
+            (country,)
+        ).fetchone()
+        if row:
+            return row
+
+    return None
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 
@@ -59,6 +127,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS visas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             country TEXT NOT NULL,
+            country_code TEXT,
             valid_from TEXT,
             valid_to TEXT,
             total_entries INTEGER DEFAULT 1,
@@ -85,6 +154,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             visa_id INTEGER,
             country TEXT NOT NULL,
+            country_code TEXT,
             date TEXT NOT NULL,
             type TEXT NOT NULL,
             remarks TEXT,
@@ -95,6 +165,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS visa_applications (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             country TEXT NOT NULL,
+            country_code TEXT,
             application_type TEXT,
             apply_date TEXT NOT NULL,
             current_status TEXT DEFAULT '开始申请',
@@ -124,7 +195,25 @@ def init_db():
         """)
     print("Database initialized.")
 
+
+def ensure_column(conn, table, column, definition):
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def migrate_schema():
+    with get_db() as conn:
+        ensure_column(conn, "visas", "country_code", "TEXT")
+        ensure_column(conn, "travels", "country_code", "TEXT")
+        ensure_column(conn, "visa_applications", "country_code", "TEXT")
+        ensure_column(conn, "visa_applications", "total_entries", "INTEGER DEFAULT 1")
+        ensure_column(conn, "visas", "visa_type", "TEXT")
+        ensure_column(conn, "visa_applications", "visa_type", "TEXT")
+        conn.execute("UPDATE visa_applications SET total_entries=1 WHERE total_entries IS NULL")
+
 init_db()
+migrate_schema()
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 
@@ -179,9 +268,13 @@ def get_visas():
 @login_required
 def create_visa():
     country = request.form.get("country", "")
+    country_code = normalize_country_code(request.form.get("country_code"))
+    if not country_code and is_country_code(country):
+        country_code = normalize_country_code(country)
     valid_from = request.form.get("valid_from") or None
     valid_to = request.form.get("valid_to") or None
     total_entries = int(request.form.get("total_entries", 1))
+    visa_type = request.form.get("visa_type") or None
     visa_number = request.form.get("visa_number") or None
     remarks = request.form.get("remarks") or None
     source_application_id = request.form.get("source_application_id") or None
@@ -194,13 +287,13 @@ def create_visa():
             fname = f"{uuid.uuid4().hex}.{ext}"
             save_path = os.path.join(VISA_FOLDER, fname)
             f.save(save_path)
-            file_path = save_path
+            file_path = stored_file_path(VISA_FOLDER, fname)
 
     with get_db() as conn:
         cur = conn.execute(
-            """INSERT INTO visas (country, valid_from, valid_to, total_entries, used_entries, visa_number, remarks, file_path, status, source_application_id)
-               VALUES (?,?,?,?,0,?,?,?,'pending',?)""",
-            (country, valid_from, valid_to, total_entries, visa_number, remarks, file_path, source_application_id)
+            """INSERT INTO visas (country, country_code, valid_from, valid_to, total_entries, used_entries, visa_type, visa_number, remarks, file_path, status, source_application_id)
+               VALUES (?,?,?,?,?,0,?,?,?,?,'pending',?)""",
+            (country, country_code, valid_from, valid_to, total_entries, visa_type, visa_number, remarks, file_path, source_application_id)
         )
         visa_id = cur.lastrowid
         conn.execute(
@@ -233,7 +326,7 @@ def update_visa(vid):
 
         update_fields = []
         update_values = []
-        for field in ["country", "valid_from", "valid_to", "total_entries", "visa_number", "remarks", "status"]:
+        for field in ["country", "country_code", "valid_from", "valid_to", "total_entries", "visa_number", "remarks", "status"]:
             if field in data:
                 update_fields.append(f"{field}=?")
                 update_values.append(data[field])
@@ -272,7 +365,16 @@ def update_visa_status(vid):
 @login_required
 def delete_visa(vid):
     with get_db() as conn:
+        row = conn.execute("SELECT file_path FROM visas WHERE id=?", (vid,)).fetchone()
+        if not row:
+            return jsonify({"error": "Not found"}), 404
+        conn.execute("DELETE FROM visa_status_history WHERE visa_id=?", (vid,))
+        conn.execute("DELETE FROM travels WHERE visa_id=?", (vid,))
         conn.execute("DELETE FROM visas WHERE id=?", (vid,))
+    file_path = row["file_path"]
+    full_path = resolve_storage_path(file_path)
+    if full_path and os.path.exists(full_path):
+        os.remove(full_path)
     return jsonify({"ok": True})
 
 # ─── Visa Applications ────────────────────────────────────────────────────────
@@ -302,15 +404,23 @@ def get_applications():
 @login_required
 def create_application():
     country = request.form.get("country", "")
+    country_code = normalize_country_code(request.form.get("country_code"))
+    if not country_code and is_country_code(country):
+        country_code = normalize_country_code(country)
     application_type = request.form.get("application_type") or None
+    visa_type = request.form.get("visa_type") or request.form.get("application_type") or None
+    try:
+        total_entries = int(request.form.get("total_entries", 1))
+    except (TypeError, ValueError):
+        total_entries = 1
     apply_date = request.form.get("apply_date") or date.today().isoformat()
     remarks = request.form.get("remarks") or None
 
     with get_db() as conn:
         cur = conn.execute(
-            """INSERT INTO visa_applications (country, application_type, apply_date, current_status, visa_result)
-               VALUES (?,?,?,'开始申请','未送签')""",
-            (country, application_type, apply_date)
+            """INSERT INTO visa_applications (country, country_code, application_type, visa_type, total_entries, apply_date, current_status, visa_result)
+                VALUES (?,?,?,?,?,?,?,?)""",
+            (country, country_code, application_type, visa_type, total_entries, apply_date, "开始申请", "未送签")
         )
         app_id = cur.lastrowid
         conn.execute(
@@ -328,7 +438,7 @@ def create_application():
                 f.save(save_path)
                 conn.execute(
                     "INSERT INTO application_files (application_id, file_path, file_name) VALUES (?,?,?)",
-                    (app_id, save_path, f.filename)
+                    (app_id, stored_file_path(APP_FOLDER, fname), f.filename)
                 )
     return jsonify({"id": app_id, "ok": True})
 
@@ -399,13 +509,18 @@ def update_application_result(aid):
         new_status = row["current_status"]
 
         if new_result == "已签发":
-            new_status = "已领取"
+            # "已签发" does not mean the visa has already been collected.
+            new_status = "已出签"
             # Auto-create visa
+            visa_country_code = normalize_country_code(row["country_code"]) if row["country_code"] else None
+            if not visa_country_code and is_country_code(row["country"]):
+                visa_country_code = normalize_country_code(row["country"])
+            application_entries = row["total_entries"] if row["total_entries"] is not None else 1
             conn.execute(
-                """INSERT INTO visas (country, valid_from, valid_to, total_entries, used_entries, visa_number, remarks, status, source_application_id)
-                   VALUES (?,?,?,?,0,?,?,'pending',?)""",
-                (row["country"], data.get("valid_from"), data.get("valid_to"),
-                 data.get("total_entries", 1), data.get("visa_number"), result_note, aid)
+                """INSERT INTO visas (country, country_code, valid_from, valid_to, total_entries, used_entries, visa_type, visa_number, remarks, file_path, status, source_application_id)
+                   VALUES (?,?,?,?,?,0,?,?,?,?,'pending',?)""",
+                (row["country"], visa_country_code, data.get("valid_from"), data.get("valid_to"),
+                 application_entries, row["visa_type"], data.get("visa_number"), result_note, None, aid)
             )
             new_visa_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             conn.execute(
@@ -414,18 +529,28 @@ def update_application_result(aid):
             )
 
         elif new_result == "降级签发" and visa_info:
+            new_status = "已出签"
             # Create visa with provided info
-            conn.execute(
-                """INSERT INTO visas (country, valid_from, valid_to, total_entries, used_entries, visa_number, remarks, status, source_application_id)
-                   VALUES (?,?,?,?,0,?,?,'pending',?)""",
-                (visa_info.get("country", row["country"]), visa_info.get("valid_from"),
-                 visa_info.get("valid_to"), visa_info.get("total_entries", 1),
-                 visa_info.get("visa_number"), visa_info.get("remarks", result_note), aid)
-            )
+            issued_country = (visa_info.get("country") or row["country"] or "").strip()
+            visa_country_code = normalize_country_code(visa_info.get("country_code"))
+            if not visa_country_code and is_country_code(issued_country):
+                visa_country_code = normalize_country_code(issued_country)
+                conn.execute(
+                     """INSERT INTO visas (country, country_code, valid_from, valid_to, total_entries, used_entries, visa_type, visa_number, remarks, file_path, status, source_application_id)
+                         VALUES (?,?,?,?,?,0,?,?,?,?,'pending',?)""",
+                     (issued_country, visa_country_code, visa_info.get("valid_from"),
+                      visa_info.get("valid_to"), visa_info.get("total_entries", 1), visa_info.get("visa_type"),
+                      visa_info.get("visa_number"), visa_info.get("remarks", result_note), None, aid)
+                )
             new_visa_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             conn.execute(
                 "INSERT INTO visa_status_history (visa_id, old_status, new_status, reason) VALUES (?,NULL,'pending','降级签发自动创建')",
                 (new_visa_id,)
+            )
+            # Downgrade issuance should update the issued country on the application.
+            conn.execute(
+                "UPDATE visa_applications SET country=?, country_code=? WHERE id=?",
+                (issued_country, visa_country_code, aid)
             )
 
         conn.execute(
@@ -456,15 +581,33 @@ def upload_application_files(aid):
                 f.save(save_path)
                 conn.execute(
                     "INSERT INTO application_files (application_id, file_path, file_name) VALUES (?,?,?)",
-                    (aid, save_path, f.filename)
+                    (aid, stored_file_path(APP_FOLDER, fname), f.filename)
                 )
                 saved.append(f.filename)
     return jsonify({"ok": True, "saved": saved})
+
+
+@app.route("/api/applications/<int:aid>/files/<int:fid>", methods=["DELETE"])
+@login_required
+def delete_application_file(aid, fid):
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM application_files WHERE id=? AND application_id=?",
+            (fid, aid)
+        ).fetchone()
+        if not row:
+            return jsonify({"error": "Not found"}), 404
+        conn.execute("DELETE FROM application_files WHERE id=?", (fid,))
+    remove_storage_file(row["file_path"])
+    return jsonify({"ok": True})
 
 @app.route("/api/applications/<int:aid>", methods=["DELETE"])
 @login_required
 def delete_application(aid):
     with get_db() as conn:
+        files = conn.execute("SELECT file_path FROM application_files WHERE application_id=?", (aid,)).fetchall()
+        for file_row in files:
+            remove_storage_file(file_row["file_path"])
         conn.execute("DELETE FROM application_files WHERE application_id=?", (aid,))
         conn.execute("DELETE FROM application_status_history WHERE application_id=?", (aid,))
         conn.execute("DELETE FROM visa_applications WHERE id=?", (aid,))
@@ -479,7 +622,7 @@ def get_travels():
         rows = conn.execute(
             """SELECT t.*, v.country as visa_country, v.status as visa_status
                FROM travels t LEFT JOIN visas v ON t.visa_id = v.id
-               ORDER BY t.date DESC, t.created_at DESC"""
+               ORDER BY t.date DESC, t.id DESC"""
         ).fetchall()
     return jsonify([dict(r) for r in rows])
 
@@ -489,42 +632,70 @@ def create_travel():
     data = request.get_json() or {}
     visa_id = data.get("visa_id") or None
     country = data.get("country", "")
+    country_code = normalize_country_code(data.get("country_code"))
+    if not country_code and is_country_code(country):
+        country_code = normalize_country_code(country)
     travel_date = data.get("date") or date.today().isoformat()
     travel_type = data.get("type", "entry")
     remarks = data.get("remarks") or None
+    enable_auto_match = bool(data.get("enable_auto_match", False))
 
     with get_db() as conn:
+        if not visa_id and enable_auto_match and travel_type == "entry":
+            matched_visa = find_matching_visa(conn, country, country_code)
+            if matched_visa:
+                visa_id = matched_visa["id"]
+
+        travel_country = country
+        if country_code and not country and visa_id:
+            travel_country = country_code
+
+        previous_open_entry = None
+        if travel_type == "entry":
+            # Global trip closure: if latest event is an entry, user is still in-travel.
+            last_travel = conn.execute(
+                "SELECT * FROM travels ORDER BY date DESC, id DESC LIMIT 1"
+            ).fetchone()
+            if last_travel and last_travel["type"] == "entry":
+                previous_open_entry = last_travel
+
+        matched_visa_country = None
+        visa_row = conn.execute(
+            "SELECT country FROM visas WHERE id=?",
+            (visa_id,)
+        ).fetchone() if visa_id else None
+        if visa_row:
+            matched_visa_country = visa_row["country"]
+
+        if travel_type == "entry" and previous_open_entry and previous_open_entry["country"] != travel_country:
+            conn.execute(
+                "INSERT INTO travels (visa_id, country, country_code, date, type, remarks) VALUES (?,?,?,?,?,?)",
+                (previous_open_entry["visa_id"], previous_open_entry["country"], previous_open_entry["country_code"], travel_date, "exit", "[系统记录] 入境其他国家")
+            )
+
         cur = conn.execute(
-            "INSERT INTO travels (visa_id, country, date, type, remarks) VALUES (?,?,?,?,?)",
-            (visa_id, country, travel_date, travel_type, remarks)
+            "INSERT INTO travels (visa_id, country, country_code, date, type, remarks) VALUES (?,?,?,?,?,?)",
+            (visa_id, travel_country, country_code, travel_date, travel_type, remarks)
         )
         travel_id = cur.lastrowid
 
-        # Auto-update visa status
         if visa_id:
             visa = conn.execute("SELECT * FROM visas WHERE id=?", (visa_id,)).fetchone()
             if visa:
                 if travel_type == "entry":
+                    # Mark visa as active on first entry
                     old_status = visa["status"]
                     total = visa["total_entries"]
                     used = visa["used_entries"] + 1
                     conn.execute("UPDATE visas SET used_entries=? WHERE id=?", (used, visa_id))
-                    # Activate visa
                     if old_status == "pending":
                         conn.execute("UPDATE visas SET status='active' WHERE id=?", (visa_id,))
                         conn.execute(
                             "INSERT INTO visa_status_history (visa_id, old_status, new_status, reason) VALUES (?,?,?,?)",
-                            (visa_id, old_status, "active", f"入境使用签证 - {country}")
-                        )
-                    # Single-entry: expire after use
-                    if total == 1:
-                        conn.execute("UPDATE visas SET status='expired' WHERE id=?", (visa_id,))
-                        conn.execute(
-                            "INSERT INTO visa_status_history (visa_id, old_status, new_status, reason) VALUES (?,?,?,?)",
-                            (visa_id, "active", "expired", "单次签证已使用")
+                            (visa_id, old_status, "active", f"入境使用签证 - {travel_country}")
                         )
                 elif travel_type == "exit":
-                    # Single-entry active: expire on exit
+                    # Single-entry visa expires on exit
                     if visa["total_entries"] == 1 and visa["status"] == "active":
                         conn.execute("UPDATE visas SET status='expired' WHERE id=?", (visa_id,))
                         conn.execute(
@@ -532,7 +703,7 @@ def create_travel():
                             (visa_id, "active", "expired", "单次签证离境后失效")
                         )
 
-    return jsonify({"id": travel_id, "ok": True})
+    return jsonify({"id": travel_id, "ok": True, "matched_visa_country": matched_visa_country})
 
 @app.route("/api/travels/<int:tid>", methods=["DELETE"])
 @login_required
@@ -562,7 +733,14 @@ def dashboard():
 
         if last_entry:
             entry_date = last_entry["date"]
-            if not last_exit or last_exit["date"] < entry_date:
+            entry_id = last_entry["id"]
+            exit_is_newer_or_equal = False
+            if last_exit:
+                exit_date = last_exit["date"]
+                exit_id = last_exit["id"]
+                exit_is_newer_or_equal = (exit_date > entry_date) or (exit_date == entry_date and exit_id >= entry_id)
+
+            if not exit_is_newer_or_equal:
                 in_travel = True
                 current_country = last_entry["country"]
                 from datetime import datetime as dt
@@ -581,13 +759,14 @@ def dashboard():
                 from datetime import datetime as dt
                 remaining = (dt.fromisoformat(v["valid_to"]) - dt.fromisoformat(today)).days
                 alert["days_remaining"] = remaining
-                alert["expiry_warning"] = remaining <= 7
+                alert["expiry_warning"] = remaining <= 30
             else:
                 alert["days_remaining"] = None
                 alert["expiry_warning"] = False
             remaining_entries = (v["total_entries"] - v["used_entries"]) if v["total_entries"] > 0 else -1
             alert["remaining_entries"] = remaining_entries
-            visa_alerts.append(alert)
+            if alert["expiry_warning"]:
+                visa_alerts.append(alert)
 
         # Pending visas count
         pending_count = conn.execute("SELECT COUNT(*) FROM visas WHERE status='pending'").fetchone()[0]
@@ -623,10 +802,10 @@ def dashboard():
 @app.route("/api/files/<path:filepath>")
 @login_required
 def serve_file(filepath):
-    full = os.path.join(os.path.dirname(__file__), filepath)
-    if not os.path.exists(full):
+    full = resolve_storage_path(filepath)
+    if not full or not os.path.exists(full):
         return jsonify({"error": "File not found"}), 404
-    return send_file(full)
+    return send_file(full, conditional=True)
 
 # ─── Frontend ─────────────────────────────────────────────────────────────────
 
