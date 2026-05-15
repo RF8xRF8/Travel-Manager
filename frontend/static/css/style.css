@@ -508,7 +508,7 @@ a { text-decoration: none; cursor: pointer; }
   font-size: 1rem;
 }
 .travel-type-icon.entry { background: var(--success-light); }
-.travel-type-icon.exit { background: var(--surface-2); }
+.travel-type-icon.exit { background: #dbeafe; }
 .travel-item-content { flex: 1; }
 .travel-item-country { font-weight: 600; font-size: .95rem; }
 .travel-item-meta { font-size: .8rem; color: var(--text-3); margin-top: 2px; }
@@ -650,7 +650,7 @@ a { text-decoration: none; cursor: pointer; }
 }
 .warning-card .icon { font-size: 1.3rem; }
 .warning-card p { font-size: .875rem; color: #92400e; }
-.warning-card strong { display: block; font-weight: 600; }
+.warning-card > div > strong { display: block; font-weight: 600; }
 
 /* ── Section headers ── */
 .section-header {

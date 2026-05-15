@@ -3,7 +3,6 @@ import sys
 import yaml
 import hashlib
 import sqlite3
-import json
 import uuid
 from datetime import datetime, date
 from functools import wraps
@@ -113,6 +112,29 @@ def find_matching_visa(conn, country, country_code):
 
     return None
 
+
+def auto_expire_expired_visas(conn):
+    """Automatically mark expired visas (pending/active past valid_to) as invalid."""
+    today = date.today().isoformat()
+    invalid_visas = conn.execute(
+        """SELECT id, status FROM visas
+           WHERE status IN ('pending', 'active') AND valid_to IS NOT NULL AND valid_to < ?
+           ORDER BY id""",
+        (today,)
+    ).fetchall()
+    
+    for visa in invalid_visas:
+        conn.execute("UPDATE visas SET status='invalid' WHERE id=?", (visa["id"],))
+        conn.execute(
+            "INSERT INTO visa_status_history (visa_id, old_status, new_status, reason) VALUES (?,?,?,?)",
+            (visa["id"], visa["status"], "invalid", "系统自动检测：有效期已过期")
+        )
+
+
+# Backward-compatible alias for older imports.
+def auto_expire_invalid_visas(conn):
+    auto_expire_expired_visas(conn)
+
 # ─── Database ─────────────────────────────────────────────────────────────────
 
 def get_db():
@@ -135,7 +157,7 @@ def init_db():
             visa_number TEXT,
             remarks TEXT,
             file_path TEXT,
-            status TEXT DEFAULT 'pending',
+            status TEXT DEFAULT 'pending',  -- pending, active, invalid
             created_at TEXT DEFAULT (datetime('now')),
             source_application_id INTEGER
         );
@@ -258,6 +280,7 @@ def me():
 def get_visas():
     status_filter = request.args.get("status")
     with get_db() as conn:
+        auto_expire_expired_visas(conn)
         if status_filter:
             rows = conn.execute("SELECT * FROM visas WHERE status=? ORDER BY created_at DESC", (status_filter,)).fetchall()
         else:
@@ -619,8 +642,9 @@ def delete_application(aid):
 @login_required
 def get_travels():
     with get_db() as conn:
+        auto_expire_expired_visas(conn)
         rows = conn.execute(
-            """SELECT t.*, v.country as visa_country, v.status as visa_status
+            """SELECT t.*, v.country as visa_country, v.status as visa_status, v.visa_type
                FROM travels t LEFT JOIN visas v ON t.visa_id = v.id
                ORDER BY t.date DESC, t.id DESC"""
         ).fetchall()
@@ -638,17 +662,10 @@ def create_travel():
     travel_date = data.get("date") or date.today().isoformat()
     travel_type = data.get("type", "entry")
     remarks = data.get("remarks") or None
-    enable_auto_match = bool(data.get("enable_auto_match", False))
 
     with get_db() as conn:
-        if not visa_id and enable_auto_match and travel_type == "entry":
-            matched_visa = find_matching_visa(conn, country, country_code)
-            if matched_visa:
-                visa_id = matched_visa["id"]
-
-        travel_country = country
-        if country_code and not country and visa_id:
-            travel_country = country_code
+        # Initialize travel_country with country name or country code
+        travel_country = country or country_code
 
         previous_open_entry = None
         if travel_type == "entry":
@@ -670,7 +687,7 @@ def create_travel():
         if travel_type == "entry" and previous_open_entry and previous_open_entry["country"] != travel_country:
             conn.execute(
                 "INSERT INTO travels (visa_id, country, country_code, date, type, remarks) VALUES (?,?,?,?,?,?)",
-                (previous_open_entry["visa_id"], previous_open_entry["country"], previous_open_entry["country_code"], travel_date, "exit", "[系统记录] 入境其他国家")
+                (previous_open_entry["visa_id"], previous_open_entry["country"], previous_open_entry["country_code"], travel_date, "exit", "[系统记录] 入境其他国家/地区")
             )
 
         cur = conn.execute(
@@ -683,11 +700,8 @@ def create_travel():
             visa = conn.execute("SELECT * FROM visas WHERE id=?", (visa_id,)).fetchone()
             if visa:
                 if travel_type == "entry":
-                    # Mark visa as active on first entry
+                    # Mark visa as active on first entry (don't count usage yet)
                     old_status = visa["status"]
-                    total = visa["total_entries"]
-                    used = visa["used_entries"] + 1
-                    conn.execute("UPDATE visas SET used_entries=? WHERE id=?", (used, visa_id))
                     if old_status == "pending":
                         conn.execute("UPDATE visas SET status='active' WHERE id=?", (visa_id,))
                         conn.execute(
@@ -695,15 +709,61 @@ def create_travel():
                             (visa_id, old_status, "active", f"入境使用签证 - {travel_country}")
                         )
                 elif travel_type == "exit":
-                    # Single-entry visa expires on exit
-                    if visa["total_entries"] == 1 and visa["status"] == "active":
-                        conn.execute("UPDATE visas SET status='expired' WHERE id=?", (visa_id,))
-                        conn.execute(
-                            "INSERT INTO visa_status_history (visa_id, old_status, new_status, reason) VALUES (?,?,?,?)",
-                            (visa_id, "active", "expired", "单次签证离境后失效")
-                        )
+                    # Increment usage on exit and check if exhausted
+                    if visa["status"] == "active":
+                        used = visa["used_entries"] + 1
+                        conn.execute("UPDATE visas SET used_entries=? WHERE id=?", (used, visa_id))
+                        if used >= visa["total_entries"]:
+                            conn.execute("UPDATE visas SET status='invalid' WHERE id=?", (visa_id,))
+                            reason = "单次签证离境后失效" if visa["total_entries"] == 1 else f"多次签证已使用完毕 ({used}/{visa['total_entries']})"
+                            conn.execute(
+                                "INSERT INTO visa_status_history (visa_id, old_status, new_status, reason) VALUES (?,?,?,?)",
+                                (visa_id, "active", "invalid", reason)
+                            )
 
     return jsonify({"id": travel_id, "ok": True, "matched_visa_country": matched_visa_country})
+
+
+@app.route("/api/travels/<int:tid>", methods=["PUT"])
+@login_required
+def update_travel(tid):
+    data = request.get_json() or {}
+
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM travels WHERE id=?", (tid,)).fetchone()
+        if not row:
+            return jsonify({"error": "Not found"}), 404
+
+        new_country = data["country"].strip() if "country" in data and isinstance(data["country"], str) else row["country"]
+        new_country_code = row["country_code"]
+        if "country_code" in data:
+            new_country_code = normalize_country_code(data.get("country_code"))
+        elif "country" in data and is_country_code(new_country):
+            new_country_code = normalize_country_code(new_country)
+
+        new_date = data.get("date", row["date"])
+        new_type = data.get("type", row["type"])
+        if new_type not in ("entry", "exit"):
+            return jsonify({"error": "type must be entry or exit"}), 400
+
+        new_visa_id = row["visa_id"]
+        if "visa_id" in data:
+            new_visa_id = data.get("visa_id")
+            if new_visa_id in ("", None):
+                new_visa_id = None
+
+        new_remarks = row["remarks"]
+        if "remarks" in data:
+            new_remarks = data.get("remarks") or None
+
+        conn.execute(
+            """UPDATE travels
+               SET visa_id=?, country=?, country_code=?, date=?, type=?, remarks=?
+               WHERE id=?""",
+            (new_visa_id, new_country, new_country_code, new_date, new_type, new_remarks, tid)
+        )
+
+    return jsonify({"ok": True})
 
 @app.route("/api/travels/<int:tid>", methods=["DELETE"])
 @login_required
@@ -719,6 +779,7 @@ def delete_travel(tid):
 def dashboard():
     today = date.today().isoformat()
     with get_db() as conn:
+        auto_expire_expired_visas(conn)
         # Latest entry/exit
         last_entry = conn.execute(
             "SELECT * FROM travels WHERE type='entry' ORDER BY date DESC, id DESC LIMIT 1"
@@ -747,22 +808,21 @@ def dashboard():
                 delta = dt.fromisoformat(today) - dt.fromisoformat(entry_date)
                 days_in = delta.days
 
-        # Active visas
-        active_visas = conn.execute(
-            "SELECT * FROM visas WHERE status='active' ORDER BY valid_to"
+        alert_window_days = 30
+        # Include both pending and active visas for expiry reminders.
+        reminding_visas = conn.execute(
+            """SELECT * FROM visas
+               WHERE status IN ('pending', 'active') AND valid_to IS NOT NULL
+               ORDER BY valid_to"""
         ).fetchall()
 
         visa_alerts = []
-        for v in active_visas:
+        for v in reminding_visas:
             alert = dict(v)
-            if v["valid_to"]:
-                from datetime import datetime as dt
-                remaining = (dt.fromisoformat(v["valid_to"]) - dt.fromisoformat(today)).days
-                alert["days_remaining"] = remaining
-                alert["expiry_warning"] = remaining <= 30
-            else:
-                alert["days_remaining"] = None
-                alert["expiry_warning"] = False
+            from datetime import datetime as dt
+            remaining = (dt.fromisoformat(v["valid_to"]) - dt.fromisoformat(today)).days
+            alert["days_remaining"] = remaining
+            alert["expiry_warning"] = 0 <= remaining <= alert_window_days
             remaining_entries = (v["total_entries"] - v["used_entries"]) if v["total_entries"] > 0 else -1
             alert["remaining_entries"] = remaining_entries
             if alert["expiry_warning"]:
@@ -771,7 +831,7 @@ def dashboard():
         # Pending visas count
         pending_count = conn.execute("SELECT COUNT(*) FROM visas WHERE status='pending'").fetchone()[0]
         active_count = conn.execute("SELECT COUNT(*) FROM visas WHERE status='active'").fetchone()[0]
-        expired_count = conn.execute("SELECT COUNT(*) FROM visas WHERE status='expired'").fetchone()[0]
+        invalid_count = conn.execute("SELECT COUNT(*) FROM visas WHERE status='invalid'").fetchone()[0]
 
         # Recent travels
         recent_travels = conn.execute(
@@ -791,7 +851,7 @@ def dashboard():
         "stats": {
             "pending": pending_count,
             "active": active_count,
-            "expired": expired_count,
+            "invalid": invalid_count,
             "pending_applications": pending_apps
         },
         "recent_travels": [dict(r) for r in recent_travels]

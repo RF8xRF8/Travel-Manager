@@ -131,16 +131,28 @@ function fmtDate(d) {
 
 function daysUntil(dateStr) {
   if (!dateStr) return null;
-  const diff = new Date(dateStr) - new Date();
-  return Math.ceil(diff / 86400000);
+  const expiryDate = new Date(dateStr);
+  expiryDate.setHours(0, 0, 0, 0);
+  const todayDate = new Date();
+  todayDate.setHours(0, 0, 0, 0);
+  const diff = expiryDate - todayDate;
+  return Math.floor(diff / 86400000);
 }
 
 function statusLabel(status) {
-  return { pending: '待使用', active: '生效中', expired: '已失效' }[status] || status;
+  const labels = { pending: '待使用', active: '生效中', invalid: '已失效' };
+  if (!Object.prototype.hasOwnProperty.call(labels, status)) {
+    throw new Error(`未知签证状态: ${status}`);
+  }
+  return labels[status];
 }
 
 function statusClass(status) {
-  return { pending: 'status-pending', active: 'status-active', expired: 'status-expired' }[status] || '';
+  const classes = { pending: 'status-pending', active: 'status-active', invalid: 'status-expired' };
+  if (!Object.prototype.hasOwnProperty.call(classes, status)) {
+    throw new Error(`未知签证状态: ${status}`);
+  }
+  return classes[status];
 }
 
 function resultDotHtml(result) {
@@ -215,6 +227,13 @@ function countryPreviewHtml(inputValue) {
   return code ? `<div class="form-hint">识别为 ${escapeHtml(code)}，对应 ${escapeHtml(countryFlagFromCode(code))} ${escapeHtml(countryNameFromCode(code))}</div>` : '';
 }
 
+function updateCountryPreview(inputValue) {
+  const previewEl = document.getElementById('t-country-preview');
+  if (previewEl) {
+    previewEl.innerHTML = countryPreviewHtml(inputValue);
+  }
+}
+
 // ══════════════════════════════════════════════════════════
 // DASHBOARD
 // ══════════════════════════════════════════════════════════
@@ -232,6 +251,12 @@ async function loadDashboard() {
 
 function renderDashboard(el, data) {
   const { in_travel, current_country, days_in, visa_alerts, stats, recent_travels } = data;
+  if (!stats || !Number.isFinite(stats.pending) || !Number.isFinite(stats.active) || !Number.isFinite(stats.invalid)) {
+    throw new Error('仪表盘返回的签证统计字段不完整');
+  }
+  if (!Array.isArray(visa_alerts) || !Array.isArray(recent_travels)) {
+    throw new Error('仪表盘返回的数据结构无效');
+  }
 
   let bannerHtml = '';
   if (in_travel) {
@@ -259,14 +284,14 @@ function renderDashboard(el, data) {
     alertsHtml = visa_alerts.map(v => {
       const warn = v.expiry_warning;
       const remLabel = v.days_remaining != null
-        ? (v.days_remaining < 0 ? `<span style="color:var(--danger);font-weight:600;">已过期 ${Math.abs(v.days_remaining)} 天</span>` : `剩余 <strong>${v.days_remaining}</strong> 天`)
+        ? (v.days_remaining < 0 ? `<span style="color:var(--danger);font-weight:600;white-space:nowrap;">已过期 ${Math.abs(v.days_remaining)} 天</span>` : `<span style="white-space:nowrap;">剩余 <strong>${v.days_remaining}</strong> 天</span>`)
         : '无期限限制';
       return `
         <div class="warning-card" style="${warn ? '' : 'background:var(--success-light);border-color:var(--accent-light);'}">
           <div class="icon">${warn ? '⚠️' : '🛂'}</div>
           <div>
             <strong style="${warn ? 'color:#92400e' : 'color:var(--accent)'}">${countryLabel(v.country, v.country_code)} 签证${warn ? ' — 即将到期！' : ''}</strong>
-            <p style="font-size:.83rem;margin-top:2px;color:var(--text-2);">
+            <p style="font-size:.83rem;margin-top:2px;color:var(--text-2);white-space:nowrap;">
               有效期至 ${fmtDate(v.valid_to)} · ${remLabel} ·
               剩余次数：${v.remaining_entries < 0 ? '不限' : v.remaining_entries}
             </p>
@@ -295,7 +320,7 @@ function renderDashboard(el, data) {
     <div class="stats-grid">
       <div class="stat-card info"><div class="stat-label">待使用签证</div><div class="stat-value">${stats.pending}</div></div>
       <div class="stat-card accent"><div class="stat-label">生效中签证</div><div class="stat-value">${stats.active}</div></div>
-      <div class="stat-card muted"><div class="stat-label">已失效签证</div><div class="stat-value">${stats.expired}</div></div>
+      <div class="stat-card muted"><div class="stat-label">已失效签证</div><div class="stat-value">${stats.invalid}</div></div>
     </div>
     ${alertsHtml ? `<div class="section-header"><div class="section-title">⚠️ 签证提醒</div></div>${alertsHtml}` : ''}
     <div class="section-header">
@@ -325,25 +350,37 @@ async function loadVisas() {
 }
 
 function renderVisas(el, visas) {
-  const counts = { valid: 0, pending: 0, active: 0, expired: 0 };
+  if (!Array.isArray(visas)) {
+    throw new Error('签证列表返回格式错误');
+  }
+  const counts = { valid: 0, pending: 0, active: 0, invalid: 0 };
   visas.forEach(v => {
-    if (counts[v.status] != null) counts[v.status]++;
-    if (v.status === 'pending' || v.status === 'active') counts.valid++;
+    if (!Object.prototype.hasOwnProperty.call(counts, v.status) || v.status === 'valid') {
+      throw new Error(`签证状态非法: ${v.status}`);
+    }
+    const status = v.status;
+    counts[status]++;
+    if (status === 'pending' || status === 'active') counts.valid++;
   });
 
-  const filtered = currentVisaFilter === 'valid'
-    ? visas.filter(v => v.status === 'pending' || v.status === 'active')
-    : visas.filter(v => v.status === currentVisaFilter);
+  if (!['valid', 'pending', 'active', 'invalid'].includes(currentVisaFilter)) {
+    throw new Error(`签证筛选值非法: ${currentVisaFilter}`);
+  }
+  const filterKey = currentVisaFilter;
 
-  const tabsHtml = ['valid','pending','active','expired'].map(s =>
+  const filtered = filterKey === 'valid'
+    ? visas.filter(v => v.status === 'pending' || v.status === 'active')
+    : visas.filter(v => v.status === filterKey);
+
+  const tabsHtml = ['valid','pending','active','invalid'].map(s =>
     `<button class="tab ${currentVisaFilter === s ? 'active' : ''}" onclick="filterVisas('${s}')" >
-      ${{ valid: '有效签证', pending: '待使用', active: '生效中', expired: '已失效' }[s]} <span style="font-size:.75rem;opacity:.6">${counts[s]}</span>
+      ${{ valid: '有效签证', pending: '待使用', active: '生效中', invalid: '已失效' }[s]} <span style="font-size:.75rem;opacity:.6">${counts[s]}</span>
     </button>`
   ).join('');
 
   const cardsHtml = filtered.length > 0
     ? `<div class="visa-grid">${filtered.map(visaCardHtml).join('')}</div>`
-    : `<div class="empty-state"><div class="icon">🗂️</div><p>暂无${{ valid: '有效', pending:'待使用', active:'生效中', expired:'已失效' }[currentVisaFilter]}签证</p></div>`;
+    : `<div class="empty-state"><div class="icon">🗂️</div><p>暂无${{ valid: '有效', pending:'待使用', active:'生效中', invalid:'已失效' }[filterKey]}签证</p></div>`;
 
   el.innerHTML = `
     <div class="page-title">签证管理</div>
@@ -425,7 +462,7 @@ function visaCardHtml(v) {
       </div>
       ${v.remarks ? `<div style="font-size:.82rem;color:var(--text-2);margin-bottom:12px;padding:8px 10px;background:var(--surface-2);border-radius:var(--radius-xs);">💬 ${v.remarks}</div>` : ''}
       <div class="visa-card-actions">
-        ${v.status !== 'expired' ? `<button class="btn btn-sm btn-danger" onclick="expireVisa(${v.id})">结束签证</button>` : ''}
+        ${v.status !== 'invalid' ? `<button class="btn btn-sm btn-danger" onclick="invalidateVisa(${v.id})">结束签证</button>` : ''}
         ${v.status === 'pending' ? `<button class="btn btn-sm btn-secondary" onclick="activateVisa(${v.id})">手动激活</button>` : ''}
         <button class="btn btn-sm btn-secondary" onclick="showEditVisaModal(${v.id})">编辑</button>
         <button class="btn btn-sm btn-secondary" onclick="showVisaHistory(${v.id})">变更历史</button>
@@ -525,7 +562,7 @@ async function showEditVisaModal(id) {
       <div class="form-group">
         <label>当前状态</label>
         <select id="ev-status">
-          ${['pending','active','expired'].map(s => `<option value="${s}" ${v.status === s ? 'selected' : ''}>${statusLabel(s)}</option>`).join('')}
+          ${['pending','active','invalid'].map(s => `<option value="${s}" ${v.status === s ? 'selected' : ''}>${statusLabel(s)}</option>`).join('')}
         </select>
       </div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
@@ -558,20 +595,20 @@ async function submitEditVisa(id) {
   } catch(e) { toast(e.message, 'error'); }
 }
 
-async function expireVisa(id) {
+async function invalidateVisa(id) {
   openModal('结束签证', `
     <p style="margin-bottom:16px;color:var(--text-2);">请输入结束原因：</p>
-    <div class="form-group"><textarea id="expire-reason" rows="3" placeholder="例：签证已使用完毕、主动结束..."></textarea></div>
+    <div class="form-group"><textarea id="invalidate-reason" rows="3" placeholder="例：签证已使用完毕、主动结束..."></textarea></div>
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button class="btn btn-secondary" onclick="closeModal()">取消</button>
-      <button class="btn btn-danger" onclick="confirmExpireVisa(${id})">确认结束</button>
+      <button class="btn btn-danger" onclick="confirmInvalidateVisa(${id})">确认结束</button>
     </div>`);
 }
 
-async function confirmExpireVisa(id) {
-  const reason = document.getElementById('expire-reason').value.trim() || '手动结束';
+async function confirmInvalidateVisa(id) {
+  const reason = document.getElementById('invalidate-reason').value.trim() || '手动结束';
   try {
-    await PUT(`/visas/${id}/status`, { status: 'expired', reason });
+    await PUT(`/visas/${id}/status`, { status: 'invalid', reason });
     toast('签证已标记为已失效');
     closeModal();
     loadVisas();
@@ -975,9 +1012,8 @@ function renderTravels(el, travels, visas) {
           <div class="travel-type-icon ${t.type}">${t.type === 'entry' ? '🛬' : '🛫'}</div>
           <div class="travel-item-content">
             <div class="travel-item-country">${countryLabel(t.country, t.country_code)} <span style="font-size:.8rem;color:var(--text-3);font-weight:400">${t.type === 'entry' ? '入境' : '离境'}</span></div>
-            <div class="travel-item-meta">${fmtDate(t.date)}${t.remarks ? ' · ' + t.remarks : ''}${t.visa_country ? ' · 使用签证: ' + countryLabel(t.visa_country) : ''}</div>
+            <div class="travel-item-meta">${fmtDate(t.date)}${t.remarks ? ' · ' + t.remarks : ''}${t.visa_country ? ' · 使用签证: ' + countryLabel(t.visa_country) : ''}${t.visa_type ? ' · 类型: ' + escapeHtml(t.visa_type) : ''}</div>
           </div>
-          <button class="btn btn-xs btn-danger" onclick="deleteTravel(${t.id})">×</button>
         </div>`).join('')
     : `<div class="empty-state" style="padding:24px"><p>暂无行程记录</p></div>`;
 
@@ -1001,7 +1037,8 @@ function renderTravels(el, travels, visas) {
           </div>
           <div class="form-group">
             <label>国家/地区二字码 *</label>
-            <input type="text" id="t-country" placeholder="例：CN" oninput="document.getElementById('t-country-preview').innerHTML = countryPreviewHtml(this.value); autoMatchTravelVisa()">
+            <input type="text" id="t-country" placeholder="例：CN" oninput="updateCountryPreview(this.value); autoMatchTravelVisa()">
+            <div id="t-country-preview"></div>
           </div>
           <div class="form-group"><label>日期</label><input type="date" id="t-date" value="${new Date().toISOString().slice(0,10)}"></div>
           <div class="form-group">
@@ -1058,7 +1095,7 @@ function autoMatchTravelVisa() {
   let matchedOption = null;
   for (const opt of visaSelect.options) {
     if (!opt.value) continue;
-    const optCode = countryCodeFromInput(opt.dataset.countryCode || '');
+    const optCode = countryCodeFromInput(opt.getAttribute('data-country-code') || '');
     if (optCode && optCode === code) {
       matchedOption = opt;
       break;
@@ -1082,30 +1119,93 @@ async function submitAddTravel() {
   const remarks = document.getElementById('t-remarks').value;
   const countryCode = countryCodeFromInput(country);
   try {
-    const res = await POST('/travels', {
+    await POST('/travels', {
       country,
       country_code: countryCode || null,
       type,
       date,
       visa_id: visa_id ? parseInt(visa_id, 10) : null,
-      remarks,
-      enable_auto_match: true
+      remarks
     });
-    let msg = `行程已记录 (${type === 'entry' ? '入境' : '离境'})`;
-    if (res.matched_visa_country) {
-      msg += ` · 自动匹配签证: ${countryLabel(res.matched_visa_country)}`;
-    }
-    toast(msg);
+    toast(`行程已记录 (${type === 'entry' ? '入境' : '离境'})`);
     loadTravels();
   } catch(e) { toast(e.message, 'error'); }
 }
 
-async function deleteTravel(id) {
+async function showEditTravelModal(id) {
+  try {
+    const [travels, visas] = await Promise.all([GET('/travels'), GET('/visas')]);
+    const travel = travels.find(t => t.id === id);
+    if (!travel) {
+      toast('未找到该行程记录', 'error');
+      return;
+    }
+
+    const visaOptions = visas
+      .filter(v => v.status === 'pending' || v.status === 'active' || v.id === travel.visa_id)
+      .map(v => `<option value="${v.id}" ${travel.visa_id === v.id ? 'selected' : ''}>[${statusLabel(v.status)}] ${countryLabel(v.country, v.country_code)}${v.visa_type ? ' (' + escapeHtml(v.visa_type) + ')' : ''}</option>`)
+      .join('');
+
+    openModal('编辑行程', `
+      <div class="form-group">
+        <label>行程类型</label>
+        <select id="et-type">
+          <option value="entry" ${travel.type === 'entry' ? 'selected' : ''}>🛬 入境</option>
+          <option value="exit" ${travel.type === 'exit' ? 'selected' : ''}>🛫 离境</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>国家/地区二字码 *</label>
+        <input type="text" id="et-country" value="${escapeHtml(travel.country || '')}" placeholder="例：CN" oninput="document.getElementById('et-country-preview').innerHTML = countryPreviewHtml(this.value)">
+        <div id="et-country-preview">${countryPreviewHtml(travel.country_code || travel.country || '')}</div>
+      </div>
+      <div class="form-group"><label>日期</label><input type="date" id="et-date" value="${escapeHtml(travel.date || '')}"></div>
+      <div class="form-group">
+        <label>关联签证（可选）</label>
+        <select id="et-visa">
+          <option value="">不关联签证</option>
+          ${visaOptions}
+        </select>
+      </div>
+      <div class="form-group"><label>备注</label><textarea id="et-remarks" rows="2" placeholder="可选">${escapeHtml(travel.remarks || '')}</textarea></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+        <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" onclick="submitEditTravel(${id})">保存</button>
+      </div>`);
+  } catch(e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function submitEditTravel(id) {
+  const country = document.getElementById('et-country').value.trim();
+  if (!country) { toast('请填写国家/地区二字码', 'error'); return; }
+  const countryCode = countryCodeFromInput(country);
+  const visaId = document.getElementById('et-visa').value;
+  try {
+    await PUT(`/travels/${id}`, {
+      country,
+      country_code: countryCode || null,
+      date: document.getElementById('et-date').value,
+      type: document.getElementById('et-type').value,
+      visa_id: visaId ? parseInt(visaId, 10) : null,
+      remarks: document.getElementById('et-remarks').value
+    });
+    toast('行程已更新');
+    closeModal();
+    loadHistory();
+  } catch(e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function deleteTravel(id, sourcePage = 'travels') {
   if (!confirm('确定删除该行程记录？')) return;
   try {
     await DELETE(`/travels/${id}`);
     toast('已删除');
-    loadTravels();
+    if (sourcePage === 'history') loadHistory();
+    else loadTravels();
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -1216,7 +1316,13 @@ function renderHistory(el, travels) {
             <div class="travel-type-icon exit" style="color:var(--text-3);">🛫</div>
             <div class="travel-item-content">
               <div class="travel-item-country" style="font-weight:600;">${countryLabel(trip.exit.country, trip.exit.country_code)} 离境</div>
-              <div class="travel-item-meta">${fmtDate(trip.exit.date)}${trip.exit.remarks ? ' · ' + trip.exit.remarks : ''}</div>
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+                <div class="travel-item-meta">${fmtDate(trip.exit.date)}${trip.exit.remarks ? ' · ' + trip.exit.remarks : ''}</div>
+                <div style="display:flex;gap:8px;flex-shrink:0;align-items:center;justify-content:flex-end;">
+                  <button class="btn btn-xs btn-secondary" onclick="showEditTravelModal(${trip.exit.id})">编辑</button>
+                  <button class="btn btn-xs btn-danger" onclick="deleteTravel(${trip.exit.id}, 'history')">删除</button>
+                </div>
+              </div>
             </div>
           </div>
         ` : `
@@ -1227,7 +1333,13 @@ function renderHistory(el, travels) {
             <div class="travel-type-icon entry" style="color:var(--accent);">🛬</div>
             <div class="travel-item-content">
               <div class="travel-item-country" style="font-weight:600;">${countryLabel(trip.entry.country, trip.entry.country_code)} 入境</div>
-              <div class="travel-item-meta">${fmtDate(trip.entry.date)}${trip.entry.remarks ? ' · ' + trip.entry.remarks : ''}${trip.entry.visa_country ? ' · 签证: ' + countryLabel(trip.entry.visa_country) : ''}</div>
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+                <div class="travel-item-meta">${fmtDate(trip.entry.date)}${trip.entry.remarks ? ' · ' + trip.entry.remarks : ''}${trip.entry.visa_country ? ' · 签证: ' + countryLabel(trip.entry.visa_country) : ''}${trip.entry.visa_type ? ' · 类型: ' + escapeHtml(trip.entry.visa_type) : ''}</div>
+                <div style="display:flex;gap:8px;flex-shrink:0;align-items:center;justify-content:flex-end;">
+                  <button class="btn btn-xs btn-secondary" onclick="showEditTravelModal(${trip.entry.id})">编辑</button>
+                  <button class="btn btn-xs btn-danger" onclick="deleteTravel(${trip.entry.id}, 'history')">删除</button>
+                </div>
+              </div>
             </div>
           </div>
         ` : `
