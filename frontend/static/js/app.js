@@ -214,7 +214,7 @@ function countryLabel(country, countryCode) {
   if (code) {
     return `${countryFlagFromCode(code)} ${countryNameFromCode(code)}`;
   }
-  return `🌏 ${country || '—'}`;
+  return `🌏 ${escapeHtml(country || '—')}`;
 }
 
 function fileUrl(filePath) {

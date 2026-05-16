@@ -37,6 +37,7 @@ for folder in [VISA_FOLDER, APP_FOLDER]:
 # ─── App ──────────────────────────────────────────────────────────────────────
 
 app = Flask(__name__, static_folder="frontend/static", template_folder="frontend")
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 
 app.secret_key = os.environ.get("TRAVEL_MANAGER_SECRET_KEY") or APP_SETTINGS.get("secret_key") or os.urandom(32)
 CORS(app, supports_credentials=True)
 
@@ -70,10 +71,13 @@ def resolve_storage_path(path):
     if not path:
         return None
     normalized = path.replace("\\", os.sep).replace("/", os.sep)
-    full = normalized if os.path.isabs(normalized) else os.path.normpath(os.path.join(BASE_DIR, normalized))
-    base = os.path.normpath(BASE_DIR)
-    if os.path.commonpath([base, os.path.normpath(full)]) != base:
+    full = os.path.normpath(os.path.join(BASE_DIR, normalized))
+    
+    # 严格限制只能访问 uploads 目录下的文件
+    allowed_dir = os.path.normpath(os.path.join(BASE_DIR, "uploads"))
+    if os.path.commonpath([allowed_dir, full]) != allowed_dir:
         return None
+        
     return full
 
 
