@@ -126,7 +126,92 @@ document.documentElement.setAttribute('data-theme', savedTheme);
 
 function fmtDate(d) {
   if (!d) return '—';
-  return d.slice(0, 10);
+  const normalized = parseDateInput(d);
+  if (!normalized) return '—';
+  const [year, month, day] = normalized.split('-');
+  return `${day}/${month}/${year}`;
+}
+
+function localTodayIso() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function parseDateInput(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10);
+
+  const digits = text.replace(/\D/g, '');
+  if (digits.length !== 8) return '';
+
+  const day = digits.slice(0, 2);
+  const month = digits.slice(2, 4);
+  const year = digits.slice(4, 8);
+  const normalized = `${year}-${month}-${day}`;
+  const parsed = new Date(`${normalized}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return '';
+  if (parsed.getFullYear() !== Number(year) || parsed.getMonth() + 1 !== Number(month) || parsed.getDate() !== Number(day)) return '';
+  return normalized;
+}
+
+function formatDateInput(value) {
+  const normalized = parseDateInput(value);
+  if (!normalized) return String(value ?? '').replace(/\D/g, '').slice(0, 8);
+  const [year, month, day] = normalized.split('-');
+  return `${day}/${month}/${year}`;
+}
+
+function formatDateField(input) {
+  if (!input) return;
+  const cursor = typeof input.selectionStart === 'number' ? input.selectionStart : String(input.value ?? '').length;
+  const digitsBeforeCursor = String(input.value ?? '').slice(0, cursor).replace(/\D/g, '').length;
+  const digits = String(input.value ?? '').replace(/\D/g, '').slice(0, 8);
+  let formatted = digits;
+  if (digits.length > 2) {
+    formatted = `${digits.slice(0, 2)}/${digits.slice(2, 4)}${digits.length > 4 ? `/${digits.slice(4, 8)}` : ''}`;
+  }
+  input.value = formatted;
+
+  let nextCursor = formatted.length;
+  if (digitsBeforeCursor <= 2) nextCursor = digitsBeforeCursor;
+  else if (digitsBeforeCursor <= 4) nextCursor = digitsBeforeCursor + 1;
+  else nextCursor = digitsBeforeCursor + 2;
+  nextCursor = Math.min(nextCursor, formatted.length);
+  try {
+    input.setSelectionRange(nextCursor, nextCursor);
+  } catch {
+    // Some browsers or input states do not support setting the caret.
+  }
+}
+
+function readDateField(id, label, { required = false } = {}) {
+  const el = document.getElementById(id);
+  if (!el) return '';
+  const raw = el.value.trim();
+  if (!raw) {
+    if (required) {
+      toast(`${label}不能为空`, 'error');
+      return null;
+    }
+    return '';
+  }
+  const normalized = parseDateInput(raw);
+  if (!normalized) {
+    toast(`${label}请填写为 DD/MM/YYYY`, 'error');
+    return null;
+  }
+  return normalized;
+}
+
+function dateInputValue(value) {
+  const normalized = parseDateInput(value);
+  if (!normalized) return '';
+  const [year, month, day] = normalized.split('-');
+  return `${day}/${month}/${year}`;
 }
 
 function daysUntil(dateStr) {
@@ -479,8 +564,8 @@ function showAddVisaModal() {
       <div id="v-country-preview">${countryPreviewHtml('')}</div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label>有效期起</label><input type="date" id="v-from"></div>
-      <div class="form-group"><label>有效期止</label><input type="date" id="v-to"></div>
+      <div class="form-group"><label>有效期起</label><input type="text" class="date-input" id="v-from" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="DD/MM/YYYY" oninput="formatDateField(this)"></div>
+      <div class="form-group"><label>有效期止</label><input type="text" class="date-input" id="v-to" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="DD/MM/YYYY" oninput="formatDateField(this)"></div>
     </div>
     <div class="form-row">
       <div class="form-group">
@@ -510,12 +595,16 @@ function showAddVisaModal() {
 async function submitAddVisa() {
   const country = document.getElementById('v-country').value.trim();
   if (!country) { toast('请填写国家/地区二字码', 'error'); return; }
+  const validFrom = readDateField('v-from', '有效期起');
+  if (validFrom === null) return;
+  const validTo = readDateField('v-to', '有效期止');
+  if (validTo === null) return;
   const fd = new FormData();
   fd.append('country', country);
   const countryCode = countryCodeFromInput(country);
   if (countryCode) fd.append('country_code', countryCode);
-  fd.append('valid_from', document.getElementById('v-from').value);
-  fd.append('valid_to', document.getElementById('v-to').value);
+  fd.append('valid_from', validFrom);
+  fd.append('valid_to', validTo);
   fd.append('total_entries', document.getElementById('v-entries').value);
   fd.append('visa_type', document.getElementById('v-type').value);
   fd.append('visa_number', document.getElementById('v-number').value);
@@ -541,8 +630,8 @@ async function showEditVisaModal(id) {
         <div id="ev-country-preview">${countryPreviewHtml(v.country_code || v.country || '')}</div>
       </div>
       <div class="form-row">
-        <div class="form-group"><label>有效期起</label><input type="date" id="ev-from" value="${escapeHtml(v.valid_from || '')}"></div>
-        <div class="form-group"><label>有效期止</label><input type="date" id="ev-to" value="${escapeHtml(v.valid_to || '')}"></div>
+        <div class="form-group"><label>有效期起</label><input type="text" class="date-input" id="ev-from" value="${escapeHtml(dateInputValue(v.valid_from))}" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="DD/MM/YYYY" oninput="formatDateField(this)"></div>
+        <div class="form-group"><label>有效期止</label><input type="text" class="date-input" id="ev-to" value="${escapeHtml(dateInputValue(v.valid_to))}" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="DD/MM/YYYY" oninput="formatDateField(this)"></div>
       </div>
       <div class="form-row">
         <div class="form-group">
@@ -576,12 +665,16 @@ async function submitEditVisa(id) {
   const country = document.getElementById('ev-country').value.trim();
   if (!country) { toast('请填写国家/地区二字码', 'error'); return; }
   const countryCode = countryCodeFromInput(country);
+  const validFrom = readDateField('ev-from', '有效期起');
+  if (validFrom === null) return;
+  const validTo = readDateField('ev-to', '有效期止');
+  if (validTo === null) return;
   try {
     await PUT(`/visas/${id}`, {
       country,
       country_code: countryCode || null,
-      valid_from: document.getElementById('ev-from').value,
-      valid_to: document.getElementById('ev-to').value,
+      valid_from: validFrom,
+      valid_to: validTo,
       total_entries: parseInt(document.getElementById('ev-entries').value, 10),
       visa_type: document.getElementById('ev-type').value,
       visa_number: document.getElementById('ev-number').value,
@@ -791,7 +884,7 @@ function showAddApplicationModal() {
         <option value="-1">不限次数（多次）</option>
       </select>
     </div>
-    <div class="form-group"><label>申请日期</label><input type="date" id="ap-date" value="${new Date().toISOString().slice(0,10)}"></div>
+    <div class="form-group"><label>申请日期</label><input type="text" class="date-input" id="ap-date" value="${dateInputValue(localTodayIso())}" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="DD/MM/YYYY" oninput="formatDateField(this)"></div>
     <div class="form-group"><label>备注</label><textarea id="ap-remarks" rows="2" placeholder="可选"></textarea></div>
     <div class="form-group">
       <label>上传文件（支持多选）</label>
@@ -806,13 +899,15 @@ function showAddApplicationModal() {
 async function submitAddApplication() {
   const country = document.getElementById('ap-country').value.trim();
   if (!country) { toast('请填写国家/地区二字码', 'error'); return; }
+  const applyDate = readDateField('ap-date', '申请日期', { required: true });
+  if (applyDate === null) return;
   const fd = new FormData();
   fd.append('country', country);
   const countryCode = countryCodeFromInput(country);
   if (countryCode) fd.append('country_code', countryCode);
   fd.append('visa_type', document.getElementById('ap-visa-type').value);
   fd.append('total_entries', document.getElementById('ap-entries').value);
-  fd.append('apply_date', document.getElementById('ap-date').value);
+  fd.append('apply_date', applyDate);
   fd.append('remarks', document.getElementById('ap-remarks').value);
   const files = document.getElementById('ap-files').files;
   for (const f of files) fd.append('files', f);
@@ -834,7 +929,7 @@ function showUpdateStatusModal(id) {
         ${STATUS_LIST.map(s => `<option value="${s}">${s}</option>`).join('')}
       </select>
     </div>
-    <div class="form-group"><label>变更日期</label><input type="date" id="status-date" value="${new Date().toISOString().slice(0,10)}"></div>
+    <div class="form-group"><label>变更日期</label><input type="text" class="date-input" id="status-date" value="${dateInputValue(localTodayIso())}" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="DD/MM/YYYY" oninput="formatDateField(this)"></div>
     <div class="form-group"><label>备注</label><input type="text" id="status-note" placeholder="可选"></div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
       <button class="btn btn-secondary" onclick="closeModal()">取消</button>
@@ -844,7 +939,8 @@ function showUpdateStatusModal(id) {
 
 async function submitUpdateStatus(id) {
   const status = document.getElementById('new-status').value;
-  const change_date = document.getElementById('status-date').value;
+  const change_date = readDateField('status-date', '变更日期', { required: true });
+  if (change_date === null) return;
   const note = document.getElementById('status-note').value;
   try {
     const res = await PUT(`/applications/${id}/status`, { status, change_date, note });
@@ -867,8 +963,8 @@ function showUpdateResultModal(id, country, currentResult) {
     <div id="issued-fields" class="hidden">
       <div class="alert alert-info">签证已签发！系统将自动在"签证管理"中创建一条新签证记录。</div>
       <div class="form-row">
-        <div class="form-group"><label>有效期起</label><input type="date" id="ri-from"></div>
-        <div class="form-group"><label>有效期止</label><input type="date" id="ri-to"></div>
+        <div class="form-group"><label>有效期起</label><input type="text" class="date-input" id="ri-from" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="DD/MM/YYYY" oninput="formatDateField(this)"></div>
+        <div class="form-group"><label>有效期止</label><input type="text" class="date-input" id="ri-to" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="DD/MM/YYYY" oninput="formatDateField(this)"></div>
       </div>
       <div class="form-row">
         <div class="form-group"><label>签证号码</label><input type="text" id="ri-number"></div>
@@ -878,8 +974,8 @@ function showUpdateResultModal(id, country, currentResult) {
       <div class="alert alert-warning">降级签发 — 请填写实际签发的签证信息。</div>
       <div class="form-group"><label>实际签发国家/地区二字码</label><input type="text" id="rd-country" value="${country}"></div>
       <div class="form-row">
-        <div class="form-group"><label>有效期起</label><input type="date" id="rd-from"></div>
-        <div class="form-group"><label>有效期止</label><input type="date" id="rd-to"></div>
+        <div class="form-group"><label>有效期起</label><input type="text" class="date-input" id="rd-from" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="DD/MM/YYYY" oninput="formatDateField(this)"></div>
+        <div class="form-group"><label>有效期止</label><input type="text" class="date-input" id="rd-to" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="DD/MM/YYYY" oninput="formatDateField(this)"></div>
       </div>
       <div class="form-row">
         <div class="form-group"><label>签证号码</label><input type="text" id="rd-number"></div>
@@ -911,17 +1007,25 @@ async function submitUpdateResult(id) {
   const body = { result, result_note };
 
   if (result === '已签发') {
-    body.valid_from = document.getElementById('ri-from').value;
-    body.valid_to = document.getElementById('ri-to').value;
+    const validFrom = readDateField('ri-from', '有效期起');
+    if (validFrom === null) return;
+    const validTo = readDateField('ri-to', '有效期止');
+    if (validTo === null) return;
+    body.valid_from = validFrom;
+    body.valid_to = validTo;
     body.visa_number = document.getElementById('ri-number').value;
   } else if (result === '降级签发') {
     const downgradeCountry = document.getElementById('rd-country').value.trim();
     const downgradeCountryCode = countryCodeFromInput(downgradeCountry);
+    const validFrom = readDateField('rd-from', '有效期起');
+    if (validFrom === null) return;
+    const validTo = readDateField('rd-to', '有效期止');
+    if (validTo === null) return;
     body.visa_info = {
       country: downgradeCountry,
       country_code: downgradeCountryCode || null,
-      valid_from: document.getElementById('rd-from').value,
-      valid_to: document.getElementById('rd-to').value,
+      valid_from: validFrom,
+      valid_to: validTo,
       visa_number: document.getElementById('rd-number').value,
       total_entries: parseInt(document.getElementById('rd-entries').value, 10),
       visa_type: document.getElementById('rd-type') ? document.getElementById('rd-type').value : undefined,
@@ -1040,7 +1144,7 @@ function renderTravels(el, travels, visas) {
             <input type="text" id="t-country" placeholder="例：CN" oninput="updateCountryPreview(this.value); autoMatchTravelVisa()">
             <div id="t-country-preview"></div>
           </div>
-          <div class="form-group"><label>日期</label><input type="date" id="t-date" value="${new Date().toISOString().slice(0,10)}"></div>
+          <div class="form-group"><label>日期</label><input type="text" class="date-input" id="t-date" value="${dateInputValue(localTodayIso())}" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="DD/MM/YYYY" oninput="formatDateField(this)"></div>
           <div class="form-group">
             <label>关联签证（可选）</label>
             <select id="t-visa">
@@ -1114,7 +1218,8 @@ async function submitAddTravel() {
   const country = document.getElementById('t-country').value.trim();
   if (!country) { toast('请填写国家/地区二字码', 'error'); return; }
   const type = document.querySelector('input[name="ttype"]:checked').value;
-  const date = document.getElementById('t-date').value;
+  const date = readDateField('t-date', '日期', { required: true });
+  if (date === null) return;
   let visa_id = document.getElementById('t-visa').value || null;
   const remarks = document.getElementById('t-remarks').value;
   const countryCode = countryCodeFromInput(country);
@@ -1159,7 +1264,7 @@ async function showEditTravelModal(id) {
         <input type="text" id="et-country" value="${escapeHtml(travel.country || '')}" placeholder="例：CN" oninput="document.getElementById('et-country-preview').innerHTML = countryPreviewHtml(this.value)">
         <div id="et-country-preview">${countryPreviewHtml(travel.country_code || travel.country || '')}</div>
       </div>
-      <div class="form-group"><label>日期</label><input type="date" id="et-date" value="${escapeHtml(travel.date || '')}"></div>
+      <div class="form-group"><label>日期</label><input type="text" class="date-input" id="et-date" value="${escapeHtml(dateInputValue(travel.date))}" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="DD/MM/YYYY" oninput="formatDateField(this)"></div>
       <div class="form-group">
         <label>关联签证（可选）</label>
         <select id="et-visa">
@@ -1182,11 +1287,13 @@ async function submitEditTravel(id) {
   if (!country) { toast('请填写国家/地区二字码', 'error'); return; }
   const countryCode = countryCodeFromInput(country);
   const visaId = document.getElementById('et-visa').value;
+  const date = readDateField('et-date', '日期', { required: true });
+  if (date === null) return;
   try {
     await PUT(`/travels/${id}`, {
       country,
       country_code: countryCode || null,
-      date: document.getElementById('et-date').value,
+      date,
       type: document.getElementById('et-type').value,
       visa_id: visaId ? parseInt(visaId, 10) : null,
       remarks: document.getElementById('et-remarks').value
