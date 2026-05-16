@@ -256,14 +256,17 @@ def login_required(f):
 
 @app.route("/api/login", methods=["POST"])
 def login():
+    import time
     data = request.get_json() or {}
     username = data.get("username", "")
     password = data.get("password", "")
     expected_user = AUTH.get("username", "admin")
     expected_hash = AUTH.get("password", "")
     if username == expected_user and sha256(password) == expected_hash:
+        time.sleep(0.5)
         session["logged_in"] = True
         return jsonify({"ok": True})
+    time.sleep(1.5)
     return jsonify({"error": "Invalid credentials"}), 401
 
 @app.route("/api/logout", methods=["POST"])
