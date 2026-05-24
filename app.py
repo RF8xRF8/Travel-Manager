@@ -9,6 +9,7 @@ from functools import wraps
 from flask import Flask, request, jsonify, send_from_directory, session, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
+import json
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -41,7 +42,7 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 app.secret_key = os.environ.get("TRAVEL_MANAGER_SECRET_KEY") or APP_SETTINGS.get("secret_key") or os.urandom(32)
 CORS(app, supports_credentials=True)
 
-ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "pdf", "webp"}
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "pdf", "webp", "doc", "docx"}
 
 BASE_DIR = os.path.dirname(__file__)
 
@@ -59,6 +60,15 @@ def normalize_country_code(value):
     return value.strip().upper()
 
 
+def normalize_country_for_storage(value):
+    """Normalize country field: if it's a 2-letter code, convert to uppercase."""
+    if not value:
+        return value
+    if is_country_code(value):
+        return value.strip().upper()
+    return value
+
+
 def normalize_storage_path(path):
     if not path:
         return None
@@ -67,16 +77,25 @@ def normalize_storage_path(path):
     return path.replace("\\", "/")
 
 
+
 def resolve_storage_path(path):
     if not path:
         return None
     normalized = path.replace("\\", os.sep).replace("/", os.sep)
     full = os.path.normpath(os.path.join(BASE_DIR, normalized))
     
-    # 严格限制只能访问 uploads 目录下的文件
-    allowed_dir = os.path.normpath(os.path.join(BASE_DIR, "uploads"))
-    if os.path.commonpath([allowed_dir, full]) != allowed_dir:
-        return None
+    #动态获取系统配置中真实的上传目录（支持如 data/uploads 等自定义路径）
+    allowed_visa_dir = os.path.normpath(os.path.join(BASE_DIR, VISA_FOLDER))
+    allowed_app_dir = os.path.normpath(os.path.join(BASE_DIR, APP_FOLDER))
+    
+    # 检查最终读取的路径，是否在这两个被允许的文件夹内
+    if os.path.commonpath([allowed_visa_dir, full]) == allowed_visa_dir:
+        return full
+    if os.path.commonpath([allowed_app_dir, full]) == allowed_app_dir:
+        return full
+        
+    # 如果都不在，说明是越权访问（比如想下 data.db），拦截！
+    return None
         
     return full
 
@@ -118,7 +137,12 @@ def find_matching_visa(conn, country, country_code):
 
 
 def auto_expire_expired_visas(conn):
-    """Automatically mark expired visas (pending/active past valid_to) as invalid."""
+    """Automatically mark expired visas as invalid when they are no longer in use.
+
+    Pending visas expire immediately. Active visas only expire after the
+    matching trip has been closed, so an in-progress stay can continue even if
+    the visa date has passed.
+    """
     today = date.today().isoformat()
     invalid_visas = conn.execute(
         """SELECT id, status FROM visas
@@ -128,11 +152,22 @@ def auto_expire_expired_visas(conn):
     ).fetchall()
     
     for visa in invalid_visas:
-        conn.execute("UPDATE visas SET status='invalid' WHERE id=?", (visa["id"],))
-        conn.execute(
-            "INSERT INTO visa_status_history (visa_id, old_status, new_status, reason) VALUES (?,?,?,?)",
-            (visa["id"], visa["status"], "invalid", "系统自动检测：有效期已过期")
-        )
+        if visa["status"] == "active":
+            latest_travel = conn.execute(
+                "SELECT type FROM travels WHERE visa_id=? ORDER BY date DESC, id DESC LIMIT 1",
+                (visa["id"],)
+            ).fetchone()
+            if latest_travel and latest_travel["type"] == "entry":
+                continue
+        current_status = conn.execute(
+            "SELECT status FROM visas WHERE id=?", (visa["id"],)
+        ).fetchone()
+        if current_status and current_status["status"] != "invalid":
+            conn.execute("UPDATE visas SET status='invalid' WHERE id=?", (visa["id"],))
+            conn.execute(
+                "INSERT INTO visa_status_history (visa_id, old_status, new_status, reason) VALUES (?,?,?,?)",
+                (visa["id"], visa["status"], "invalid", "系统自动检测：有效期已过期")
+            )
 
 
 # Backward-compatible alias for older imports.
@@ -236,7 +271,9 @@ def migrate_schema():
         ensure_column(conn, "visa_applications", "total_entries", "INTEGER DEFAULT 1")
         ensure_column(conn, "visas", "visa_type", "TEXT")
         ensure_column(conn, "visa_applications", "visa_type", "TEXT")
+        ensure_column(conn, "visas", "file_name", "TEXT")
         conn.execute("UPDATE visa_applications SET total_entries=1 WHERE total_entries IS NULL")
+        # (dev) 不进行历史回填以保持开发环境纯粹
 
 init_db()
 migrate_schema()
@@ -297,7 +334,7 @@ def get_visas():
 @app.route("/api/visas", methods=["POST"])
 @login_required
 def create_visa():
-    country = request.form.get("country", "")
+    country = normalize_country_for_storage(request.form.get("country", ""))
     country_code = normalize_country_code(request.form.get("country_code"))
     if not country_code and is_country_code(country):
         country_code = normalize_country_code(country)
@@ -310,6 +347,7 @@ def create_visa():
     source_application_id = request.form.get("source_application_id") or None
 
     file_path = None
+    file_name = None
     if "file" in request.files:
         f = request.files["file"]
         if f and f.filename and allowed_file(f.filename):
@@ -318,12 +356,13 @@ def create_visa():
             save_path = os.path.join(VISA_FOLDER, fname)
             f.save(save_path)
             file_path = stored_file_path(VISA_FOLDER, fname)
+            file_name = f.filename
 
     with get_db() as conn:
         cur = conn.execute(
-            """INSERT INTO visas (country, country_code, valid_from, valid_to, total_entries, used_entries, visa_type, visa_number, remarks, file_path, status, source_application_id)
-               VALUES (?,?,?,?,?,0,?,?,?,?,'pending',?)""",
-            (country, country_code, valid_from, valid_to, total_entries, visa_type, visa_number, remarks, file_path, source_application_id)
+                """INSERT INTO visas (country, country_code, valid_from, valid_to, total_entries, used_entries, visa_type, visa_number, remarks, file_path, file_name, status, source_application_id)
+                    VALUES (?,?,?,?,?,0,?,?,?,?,?,'pending',?)""",
+                (country, country_code, valid_from, valid_to, total_entries, visa_type, visa_number, remarks, file_path, file_name, source_application_id)
         )
         visa_id = cur.lastrowid
         conn.execute(
@@ -345,7 +384,23 @@ def get_visa(vid):
 @app.route("/api/visas/<int:vid>", methods=["PUT"])
 @login_required
 def update_visa(vid):
-    data = request.get_json() or {}
+    # Support both JSON and multipart/form-data (for file upload)
+    data = {}
+    file_path = None
+    file_name = None
+    if request.content_type and "multipart/form-data" in request.content_type:
+        data = request.form.to_dict()
+        if "file" in request.files:
+            f = request.files["file"]
+            if f and f.filename and allowed_file(f.filename):
+                ext = f.filename.rsplit(".", 1)[1].lower()
+                fname = f"{uuid.uuid4().hex}.{ext}"
+                save_path = os.path.join(VISA_FOLDER, fname)
+                f.save(save_path)
+                file_path = stored_file_path(VISA_FOLDER, fname)
+                file_name = f.filename
+    else:
+        data = request.get_json() or {}
     with get_db() as conn:
         row = conn.execute("SELECT * FROM visas WHERE id=?", (vid,)).fetchone()
         if not row:
@@ -360,6 +415,13 @@ def update_visa(vid):
             if field in data:
                 update_fields.append(f"{field}=?")
                 update_values.append(data[field])
+        # If a file was uploaded, update file_path as well
+        if file_path:
+            update_fields.append("file_path=?")
+            update_values.append(file_path)
+        if file_name:
+            update_fields.append("file_name=?")
+            update_values.append(file_name)
         if update_fields:
             update_values.append(vid)
             conn.execute(f"UPDATE visas SET {', '.join(update_fields)} WHERE id=?", update_values)
@@ -433,7 +495,7 @@ def get_applications():
 @app.route("/api/applications", methods=["POST"])
 @login_required
 def create_application():
-    country = request.form.get("country", "")
+    country = normalize_country_for_storage(request.form.get("country", ""))
     country_code = normalize_country_code(request.form.get("country_code"))
     if not country_code and is_country_code(country):
         country_code = normalize_country_code(country)
@@ -522,10 +584,46 @@ def update_application_status(aid):
 @app.route("/api/applications/<int:aid>/result", methods=["PUT"])
 @login_required
 def update_application_result(aid):
-    data = request.get_json() or {}
+    # Support JSON and multipart/form-data (for uploading visa attachment during result update)
+    data = {}
+    file_path = None
+    file_name = None
+    if request.content_type and "multipart/form-data" in request.content_type:
+        # form fields may include 'result', 'result_note', and for downgrade a JSON string 'visa_info'
+        data = request.form.to_dict()
+        # parse visa_info into a separate variable if provided as JSON string
+        visa_info = None
+        if data.get('visa_info'):
+            try:
+                visa_info = json.loads(data['visa_info'])
+            except Exception:
+                visa_info = {}
+        # accept either single 'file' or 'files' (take first)
+        if 'file' in request.files:
+            f = request.files['file']
+        else:
+            files = request.files.getlist('files')
+            f = files[0] if files else None
+        if f and f.filename and allowed_file(f.filename):
+            orig_file_name = f.filename
+            ext = f.filename.rsplit('.', 1)[1].lower()
+            fname = f"{uuid.uuid4().hex}.{ext}"
+            save_path = os.path.join(VISA_FOLDER, fname)
+            f.save(save_path)
+            file_path = stored_file_path(VISA_FOLDER, fname)
+            file_name = orig_file_name
+    else:
+        data = request.get_json() or {}
     new_result = data.get("result")
     result_note = data.get("result_note", "")
-    visa_info = data.get("visa_info")  # for 降级签发
+    # visa_info may already be parsed from multipart branch
+    if 'visa_info' not in locals():
+        visa_info = data.get("visa_info")  # for 降级签发
+        if isinstance(visa_info, str):
+            try:
+                visa_info = json.loads(visa_info)
+            except Exception:
+                visa_info = {}
     change_date = data.get("change_date") or date.today().isoformat()
 
     if not new_result:
@@ -547,10 +645,10 @@ def update_application_result(aid):
                 visa_country_code = normalize_country_code(row["country"])
             application_entries = row["total_entries"] if row["total_entries"] is not None else 1
             conn.execute(
-                """INSERT INTO visas (country, country_code, valid_from, valid_to, total_entries, used_entries, visa_type, visa_number, remarks, file_path, status, source_application_id)
-                   VALUES (?,?,?,?,?,0,?,?,?,?,'pending',?)""",
+                """INSERT INTO visas (country, country_code, valid_from, valid_to, total_entries, used_entries, visa_type, visa_number, remarks, file_path, file_name, status, source_application_id)
+                   VALUES (?,?,?,?,?,0,?,?,?,?,?,'pending',?)""",
                 (row["country"], visa_country_code, data.get("valid_from"), data.get("valid_to"),
-                 application_entries, row["visa_type"], data.get("visa_number"), result_note, None, aid)
+                 application_entries, row["visa_type"], data.get("visa_number"), result_note, file_path, file_name, aid)
             )
             new_visa_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             conn.execute(
@@ -566,11 +664,11 @@ def update_application_result(aid):
             if not visa_country_code and is_country_code(issued_country):
                 visa_country_code = normalize_country_code(issued_country)
                 conn.execute(
-                     """INSERT INTO visas (country, country_code, valid_from, valid_to, total_entries, used_entries, visa_type, visa_number, remarks, file_path, status, source_application_id)
-                         VALUES (?,?,?,?,?,0,?,?,?,?,'pending',?)""",
-                     (issued_country, visa_country_code, visa_info.get("valid_from"),
-                      visa_info.get("valid_to"), visa_info.get("total_entries", 1), visa_info.get("visa_type"),
-                      visa_info.get("visa_number"), visa_info.get("remarks", result_note), None, aid)
+                    """INSERT INTO visas (country, country_code, valid_from, valid_to, total_entries, used_entries, visa_type, visa_number, remarks, file_path, file_name, status, source_application_id)
+                        VALUES (?,?,?,?,?,0,?,?,?,?,?,'pending',?)""",
+                    (issued_country, visa_country_code, visa_info.get("valid_from"),
+                     visa_info.get("valid_to"), visa_info.get("total_entries", 1), visa_info.get("visa_type"),
+                     visa_info.get("visa_number"), visa_info.get("remarks", result_note), file_path, file_name, aid)
                 )
             new_visa_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             conn.execute(
@@ -580,7 +678,7 @@ def update_application_result(aid):
             # Downgrade issuance should update the issued country on the application.
             conn.execute(
                 "UPDATE visa_applications SET country=?, country_code=? WHERE id=?",
-                (issued_country, visa_country_code, aid)
+                (normalize_country_for_storage(issued_country), visa_country_code, aid)
             )
 
         conn.execute(
@@ -694,12 +792,12 @@ def create_travel():
         if travel_type == "entry" and previous_open_entry and previous_open_entry["country"] != travel_country:
             conn.execute(
                 "INSERT INTO travels (visa_id, country, country_code, date, type, remarks) VALUES (?,?,?,?,?,?)",
-                (previous_open_entry["visa_id"], previous_open_entry["country"], previous_open_entry["country_code"], travel_date, "exit", "[系统记录] 入境其他国家/地区")
+                (previous_open_entry["visa_id"], normalize_country_for_storage(previous_open_entry["country"]), previous_open_entry["country_code"], travel_date, "exit", "[系统记录] 入境其他国家/地区")
             )
 
         cur = conn.execute(
             "INSERT INTO travels (visa_id, country, country_code, date, type, remarks) VALUES (?,?,?,?,?,?)",
-            (visa_id, travel_country, country_code, travel_date, travel_type, remarks)
+            (visa_id, normalize_country_for_storage(travel_country), country_code, travel_date, travel_type, remarks)
         )
         travel_id = cur.lastrowid
 
@@ -720,7 +818,8 @@ def create_travel():
                     if visa["status"] == "active":
                         used = visa["used_entries"] + 1
                         conn.execute("UPDATE visas SET used_entries=? WHERE id=?", (used, visa_id))
-                        if used >= visa["total_entries"]:
+                        # Only mark as invalid if total_entries > 0 (not unlimited) and used >= total_entries
+                        if visa["total_entries"] > 0 and used >= visa["total_entries"]:
                             conn.execute("UPDATE visas SET status='invalid' WHERE id=?", (visa_id,))
                             reason = "单次签证离境后失效" if visa["total_entries"] == 1 else f"多次签证已使用完毕 ({used}/{visa['total_entries']})"
                             conn.execute(
@@ -842,7 +941,7 @@ def dashboard():
 
         # Recent travels
         recent_travels = conn.execute(
-            "SELECT * FROM travels ORDER BY date DESC LIMIT 5"
+            "SELECT * FROM travels ORDER BY date DESC, id DESC LIMIT 5"
         ).fetchall()
 
         # Pending applications

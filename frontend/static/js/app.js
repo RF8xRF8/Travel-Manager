@@ -393,7 +393,7 @@ function renderDashboard(el, data) {
           </div>
           <div class="travel-item-content">
             <div class="travel-item-country">${countryLabel(t.country, t.country_code)}</div>
-            <div class="travel-item-meta">${fmtDate(t.date)} · ${t.type === 'entry' ? '入境' : '离境'}${t.remarks ? ' · ' + t.remarks : ''}</div>
+            <div class="travel-item-meta" style="white-space:pre-wrap;word-break:break-word;">${t.remarks ? t.remarks + '\n' : ''}${t.type === 'entry' ? '入境' : '离境'}\n${fmtDate(t.date)}</div>
           </div>
         </div>`).join('')
     : `<div class="empty-state" style="padding:24px"><p>暂无行程记录</p></div>`;
@@ -534,7 +534,7 @@ function visaCardHtml(v) {
         </div>
         <div class="visa-info-item">
           <label>签证号码</label>
-          <span style="font-family:var(--mono);font-size:.82rem">${v.visa_number || '—'}</span>
+            <span>${v.visa_number || '—'}</span>
         </div>
         <div class="visa-info-item">
           <label>国家/地区二字码</label>
@@ -584,7 +584,7 @@ function showAddVisaModal() {
     <div class="form-group"><label>备注</label><textarea id="v-remarks" rows="2" placeholder="可选"></textarea></div>
     <div class="form-group">
       <label>签证附件</label>
-      <input type="file" id="v-file" accept="image/*,.pdf">
+      <input type="file" id="v-file" accept="image/*,.pdf,.doc,.docx">
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
       <button class="btn btn-secondary" onclick="closeModal()">取消</button>
@@ -654,6 +654,10 @@ async function showEditVisaModal(id) {
           ${['pending','active','invalid'].map(s => `<option value="${s}" ${v.status === s ? 'selected' : ''}>${statusLabel(s)}</option>`).join('')}
         </select>
       </div>
+      <div class="form-group">
+        <label>签证附件</label>
+        <input type="file" id="ev-file" accept="image/*,.pdf,.doc,.docx">
+      </div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
         <button class="btn btn-secondary" onclick="closeModal()">取消</button>
         <button class="btn btn-primary" onclick="submitEditVisa(${id})">保存</button>
@@ -670,18 +674,35 @@ async function submitEditVisa(id) {
   const validTo = readDateField('ev-to', '有效期止');
   if (validTo === null) return;
   try {
-    await PUT(`/visas/${id}`, {
-      country,
-      country_code: countryCode || null,
-      valid_from: validFrom,
-      valid_to: validTo,
-      total_entries: parseInt(document.getElementById('ev-entries').value, 10),
-      visa_type: document.getElementById('ev-type').value,
-      visa_number: document.getElementById('ev-number').value,
-      remarks: document.getElementById('ev-remarks').value,
-      status: document.getElementById('ev-status').value,
-      reason: '编辑签证'
-    });
+    const fileEl = document.getElementById('ev-file');
+    if (fileEl && fileEl.files && fileEl.files[0]) {
+      const fd = new FormData();
+      fd.append('country', country);
+      if (countryCode) fd.append('country_code', countryCode);
+      fd.append('valid_from', validFrom);
+      fd.append('valid_to', validTo);
+      fd.append('total_entries', String(parseInt(document.getElementById('ev-entries').value, 10)));
+      fd.append('visa_type', document.getElementById('ev-type').value);
+      fd.append('visa_number', document.getElementById('ev-number').value);
+      fd.append('remarks', document.getElementById('ev-remarks').value);
+      fd.append('status', document.getElementById('ev-status').value);
+      fd.append('reason', '编辑签证');
+      fd.append('file', fileEl.files[0]);
+      await api('PUT', `/visas/${id}`, fd, true);
+    } else {
+      await PUT(`/visas/${id}`, {
+        country,
+        country_code: countryCode || null,
+        valid_from: validFrom,
+        valid_to: validTo,
+        total_entries: parseInt(document.getElementById('ev-entries').value, 10),
+        visa_type: document.getElementById('ev-type').value,
+        visa_number: document.getElementById('ev-number').value,
+        remarks: document.getElementById('ev-remarks').value,
+        status: document.getElementById('ev-status').value,
+        reason: '编辑签证'
+      });
+    }
     toast('签证已更新');
     closeModal();
     loadVisas();
@@ -888,7 +909,7 @@ function showAddApplicationModal() {
     <div class="form-group"><label>备注</label><textarea id="ap-remarks" rows="2" placeholder="可选"></textarea></div>
     <div class="form-group">
       <label>上传文件（支持多选）</label>
-      <input type="file" id="ap-files" multiple accept="image/*,.pdf">
+      <input type="file" id="ap-files" multiple accept="image/*,.pdf,.doc,.docx">
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
       <button class="btn btn-secondary" onclick="closeModal()">取消</button>
@@ -968,6 +989,7 @@ function showUpdateResultModal(id, country, currentResult) {
       </div>
       <div class="form-row">
         <div class="form-group"><label>签证号码</label><input type="text" id="ri-number"></div>
+        <div class="form-group"><label>附件</label><input type="file" id="ri-file" accept="image/*,.pdf,.doc,.docx"></div>
       </div>
     </div>
     <div id="downgrade-fields" class="hidden">
@@ -986,6 +1008,7 @@ function showUpdateResultModal(id, country, currentResult) {
       </div>
       <div class="form-group"><label>签证类型</label><input type="text" id="rd-type" placeholder="例：B1/B2、V44等（可选）"></div>
       <div class="form-group"><label>备注</label><textarea id="rd-remarks" rows="2"></textarea></div>
+      <div class="form-group"><label>附件</label><input type="file" id="rd-file" accept="image/*,.pdf,.doc,.docx"></div>
     </div>
     <div class="form-group"><label>结果说明</label><textarea id="result-note" rows="2" placeholder="可选"></textarea></div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
@@ -1014,6 +1037,8 @@ async function submitUpdateResult(id) {
     body.valid_from = validFrom;
     body.valid_to = validTo;
     body.visa_number = document.getElementById('ri-number').value;
+    // prepare potential file for multipart submission later
+    var riFileEl = document.getElementById('ri-file');
   } else if (result === '降级签发') {
     const downgradeCountry = document.getElementById('rd-country').value.trim();
     const downgradeCountryCode = countryCodeFromInput(downgradeCountry);
@@ -1031,10 +1056,35 @@ async function submitUpdateResult(id) {
       visa_type: document.getElementById('rd-type') ? document.getElementById('rd-type').value : undefined,
       remarks: document.getElementById('rd-remarks').value
     };
+    var rdFileEl = document.getElementById('rd-file');
   }
 
   try {
-    await PUT(`/applications/${id}/result`, body);
+    // If an attachment was selected in the modal, send multipart directly to the result endpoint
+    let usedMultipart = false;
+    if (result === '已签发' && riFileEl && riFileEl.files && riFileEl.files.length) {
+      const fd = new FormData();
+      fd.append('result', result);
+      fd.append('result_note', result_note);
+      fd.append('valid_from', body.valid_from);
+      fd.append('valid_to', body.valid_to);
+      fd.append('visa_number', body.visa_number || '');
+      fd.append('file', riFileEl.files[0]);
+      await api('PUT', `/applications/${id}/result`, fd, true);
+      usedMultipart = true;
+    } else if (result === '降级签发' && rdFileEl && rdFileEl.files && rdFileEl.files.length) {
+      const fd = new FormData();
+      fd.append('result', result);
+      fd.append('result_note', result_note);
+      fd.append('visa_info', JSON.stringify(body.visa_info));
+      fd.append('file', rdFileEl.files[0]);
+      await api('PUT', `/applications/${id}/result`, fd, true);
+      usedMultipart = true;
+    }
+
+    if (!usedMultipart) {
+      await PUT(`/applications/${id}/result`, body);
+    }
     toast('结果已更新');
     closeModal();
     loadApplications();
@@ -1045,7 +1095,7 @@ function showUploadFilesModal(id) {
   openModal('上传文件', `
     <div class="form-group">
       <label>选择文件（支持多选）</label>
-      <input type="file" id="upload-files" multiple accept="image/*,.pdf">
+      <input type="file" id="upload-files" multiple accept="image/*,.pdf,.doc,.docx">
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
       <button class="btn btn-secondary" onclick="closeModal()">取消</button>
@@ -1116,7 +1166,7 @@ function renderTravels(el, travels, visas) {
           <div class="travel-type-icon ${t.type}">${t.type === 'entry' ? '🛬' : '🛫'}</div>
           <div class="travel-item-content">
             <div class="travel-item-country">${countryLabel(t.country, t.country_code)} <span style="font-size:.8rem;color:var(--text-3);font-weight:400">${t.type === 'entry' ? '入境' : '离境'}</span></div>
-            <div class="travel-item-meta">${fmtDate(t.date)}${t.remarks ? ' · ' + t.remarks : ''}${t.visa_country ? ' · 使用签证: ' + countryLabel(t.visa_country) : ''}${t.visa_type ? ' · 类型: ' + escapeHtml(t.visa_type) : ''}</div>
+            <div class="travel-item-meta" style="white-space:pre-wrap;word-break:break-word;">${t.remarks ? t.remarks + '\n' : ''}${t.visa_country ? '使用签证: ' + countryLabel(t.visa_country) + (t.visa_type ? ' · 类型: ' + escapeHtml(t.visa_type) : '') + '\n' : ''}${fmtDate(t.date)}</div>
           </div>
         </div>`).join('')
     : `<div class="empty-state" style="padding:24px"><p>暂无行程记录</p></div>`;
@@ -1424,7 +1474,7 @@ function renderHistory(el, travels) {
             <div class="travel-item-content">
               <div class="travel-item-country" style="font-weight:600;">${countryLabel(trip.exit.country, trip.exit.country_code)} 离境</div>
               <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-                <div class="travel-item-meta">${fmtDate(trip.exit.date)}${trip.exit.remarks ? ' · ' + trip.exit.remarks : ''}</div>
+                <div class="travel-item-meta" style="white-space:pre-wrap;word-break:break-word;">${trip.exit.remarks ? trip.exit.remarks + '\n' : ''}${fmtDate(trip.exit.date)}</div>
                 <div style="display:flex;gap:8px;flex-shrink:0;align-items:center;justify-content:flex-end;">
                   <button class="btn btn-xs btn-secondary" onclick="showEditTravelModal(${trip.exit.id})">编辑</button>
                   <button class="btn btn-xs btn-danger" onclick="deleteTravel(${trip.exit.id}, 'history')">删除</button>
@@ -1441,7 +1491,7 @@ function renderHistory(el, travels) {
             <div class="travel-item-content">
               <div class="travel-item-country" style="font-weight:600;">${countryLabel(trip.entry.country, trip.entry.country_code)} 入境</div>
               <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-                <div class="travel-item-meta">${fmtDate(trip.entry.date)}${trip.entry.remarks ? ' · ' + trip.entry.remarks : ''}${trip.entry.visa_country ? ' · 签证: ' + countryLabel(trip.entry.visa_country) : ''}${trip.entry.visa_type ? ' · 类型: ' + escapeHtml(trip.entry.visa_type) : ''}</div>
+                <div class="travel-item-meta" style="white-space:pre-wrap;word-break:break-word;">${trip.entry.remarks ? trip.entry.remarks + '\n' : ''}${trip.entry.visa_country ? '使用签证: ' + countryLabel(trip.entry.visa_country) + (trip.entry.visa_type ? ' · 类型: ' + escapeHtml(trip.entry.visa_type) : '') + '\n' : ''}${fmtDate(trip.entry.date)}</div>
                 <div style="display:flex;gap:8px;flex-shrink:0;align-items:center;justify-content:flex-end;">
                   <button class="btn btn-xs btn-secondary" onclick="showEditTravelModal(${trip.entry.id})">编辑</button>
                   <button class="btn btn-xs btn-danger" onclick="deleteTravel(${trip.entry.id}, 'history')">删除</button>
