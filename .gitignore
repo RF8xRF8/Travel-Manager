@@ -12,3 +12,4 @@ wheels/
 #No uploads
 uploads/
 *.db
+*.log

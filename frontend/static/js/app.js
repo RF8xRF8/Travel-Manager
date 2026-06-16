@@ -111,16 +111,38 @@ function toggleSidebar() {
   document.querySelector('.sidebar').classList.toggle('open');
 }
 
-function toggleTheme() {
-  const html = document.documentElement;
-  const isDark = html.getAttribute('data-theme') === 'dark';
-  html.setAttribute('data-theme', isDark ? 'light' : 'dark');
-  localStorage.setItem('theme', isDark ? 'light' : 'dark');
+// ── Theme (三态：auto / dark / light，和教务监控一样) ──
+function applyTheme(theme) {
+  if (theme === 'auto') {
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    if (prefersDark) {
+      document.documentElement.removeAttribute('data-theme');
+    } else {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+  } else if (theme === 'dark') {
+    document.documentElement.setAttribute('data-theme', 'dark');
+  } else {
+    document.documentElement.setAttribute('data-theme', 'light');
+  }
+  updateThemeButton(theme);
+  localStorage.setItem('theme-preference', theme);
 }
 
-// Restore theme
-const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-document.documentElement.setAttribute('data-theme', savedTheme);
+function updateThemeButton(theme) {
+  document.querySelectorAll('.theme-option').forEach(btn => btn.classList.remove('active'));
+  if (theme === 'auto') {
+    document.getElementById('theme-auto').classList.add('active');
+  } else if (theme === 'dark') {
+    document.getElementById('theme-dark').classList.add('active');
+  } else {
+    document.getElementById('theme-light').classList.add('active');
+  }
+}
+
+// Restore theme on load
+const savedTheme = localStorage.getItem('theme-preference');
+applyTheme(savedTheme || 'auto');
 
 // ── Helpers ──────────────────────────────────────────────
 
